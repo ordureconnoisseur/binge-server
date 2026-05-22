@@ -1,0 +1,10 @@
+binge-server
+binge-server.exe
+binge-server.db
+binge-server.db-wal
+binge-server.db-shm
+*.log
+*.err
+.git
+.idea
+.vscode
