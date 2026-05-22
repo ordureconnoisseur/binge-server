@@ -1,0 +1,124 @@
+# Builds + publishes binge-server release artefacts on every v*.*.* tag.
+#
+# Two parallel jobs:
+#   - binaries: cross-compile for darwin/{arm64,amd64}, linux/{amd64,arm64},
+#     windows/amd64 and attach to GitHub Releases.
+#   - docker: build a multi-arch image and push to ghcr.io as
+#     ghcr.io/ordureconnoisseur/binge-server:vX.Y.Z + :latest.
+#
+# To cut a release: `git tag v0.1.0 && git push --tags`.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write   # for GitHub Releases
+  packages: write   # for ghcr.io push
+
+jobs:
+  binaries:
+    name: build binary (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME}" \
+            -o "dist/binge-server${{ matrix.ext }}" .
+
+      - name: Pack archive
+        run: |
+          NAME="binge-server_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          STAGE="release/${NAME}"
+          mkdir -p "${STAGE}"
+          cp "dist/binge-server${{ matrix.ext }}" "${STAGE}/"
+          cp README.md LICENSE "${STAGE}/"
+          cd release
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r "../${NAME}.zip" "${NAME}"
+          else
+            tar -czvf "../${NAME}.tar.gz" "${NAME}"
+          fi
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            binge-server_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+            binge-server_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          generate_release_notes: true
+
+  docker:
+    name: docker image (multi-arch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image name
+        id: image
+        run: |
+          echo "ref=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.ref }}:${{ github.ref_name }}
+            ${{ steps.image.outputs.ref }}:latest
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -20,8 +20,13 @@ import (
 	"github.com/ordureconnoisseur/binge-server/internal/stash"
 )
 
+// Version is set at build time via -ldflags "-X main.Version=v0.1.0".
+// Defaults to "dev" for ad-hoc `go run .` invocations.
+var Version = "dev"
+
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log.Info("binge-server starting", "version", Version)
 
 	cfg := loadConfig()
 
@@ -110,7 +115,7 @@ func loadConfig() config {
 		stashURL:              strings.TrimRight(envOr("STASH_URL", "http://localhost:9999"), "/"),
 		stashAPIKey:           os.Getenv("STASH_API_KEY"),
 		redditCookie:          os.Getenv("REDDIT_SESSION_COOKIE"),
-		redditUserAgent:       ua,
+		redditUserAgent:       ua + " " + Version,
 		pollInterval:          envDuration("BINGE_POLL_INTERVAL", 4*time.Hour),
 		performerSyncInterval: envDuration("BINGE_PERFORMER_SYNC_INTERVAL", 24*time.Hour),
 		// Default "*" keeps the existing Docker deploy working. The

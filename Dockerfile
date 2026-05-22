@@ -4,6 +4,12 @@
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 
+# Version is plumbed in via the release workflow's build-arg and
+# embedded into the binary via -X main.Version. Local `docker build`
+# falls back to "docker" so the binary's logs at least say where it
+# came from.
+ARG VERSION=docker
+
 # Cache go module downloads layer.
 COPY go.mod go.sum ./
 RUN go mod download
@@ -13,7 +19,9 @@ COPY . .
 # CGO disabled keeps modernc.org/sqlite in pure-Go mode (smaller image,
 # no glibc dependency in the final stage).
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w" -o /out/binge-server .
+RUN go build -trimpath \
+    -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/binge-server .
 
 # ── Runtime stage ──────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot
