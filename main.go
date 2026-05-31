@@ -118,12 +118,13 @@ func loadConfig() config {
 		redditUserAgent:       ua + " " + Version,
 		pollInterval:          envDuration("BINGE_POLL_INTERVAL", 4*time.Hour),
 		performerSyncInterval: envDuration("BINGE_PERFORMER_SYNC_INTERVAL", 24*time.Hour),
-		// CORS allowlist. Defaults to localhost:9999 (same-host Stash);
-		// loopback is always permitted. Cross-host deploys MUST set this
-		// to their Stash browser origin (comma-separated list allowed) —
-		// a literal "*" is ignored (wildcard CORS on a credential API is
-		// unsafe), so cross-origin browser access fails closed.
-		allowedOrigin: envOr("BINGE_ALLOWED_ORIGIN", "http://localhost:9999"),
+		// CORS allowlist. Loopback / private / tailnet Stash origins are
+		// allowed automatically (zero config for the common self-hosted
+		// case). Set this only when Stash is served from a PUBLIC origin
+		// (a real domain behind a reverse proxy) — comma-separated, e.g.
+		// "https://stash.example.com". A literal "*" is ignored (wildcard
+		// CORS on a credential API is unsafe).
+		allowedOrigin: os.Getenv("BINGE_ALLOWED_ORIGIN"),
 	}
 }
 

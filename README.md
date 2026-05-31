@@ -23,13 +23,12 @@ docker run -d \
   -p 127.0.0.1:7878:7878 \
   -v ~/binge-server-data:/data \
   -e BINGE_DB_PATH=/data/binge-server.db \
-  -e BINGE_ALLOWED_ORIGIN=http://localhost:9999 \
   ghcr.io/ordureconnoisseur/binge-server:latest
 ```
 
 The bind `127.0.0.1:7878` keeps the daemon reachable only from the same machine. Drop the `127.0.0.1:` prefix if you need to expose it to your LAN.
 
-`BINGE_ALLOWED_ORIGIN` is the URL of your Stash instance. The daemon will only accept `/config` POSTs from that origin.
+**CORS / credentials:** the daemon protects its credential-writing endpoints against cross-origin browser attacks. Stash served from **localhost, a LAN IP, or a Tailscale host is allowed automatically** — no config needed. You only need to set `BINGE_ALLOWED_ORIGIN` (to your Stash origin, e.g. `https://stash.example.com`) when Stash is served from a **public domain** behind a reverse proxy.
 
 Once it's up, open binge → Settings → "binge-server configuration" card and paste your Reddit session cookie there. (Stash API key is auto-detected.)
 
@@ -84,7 +83,7 @@ Both are stored in SQLite (`binge-server.db`, in `/data` if you mounted the Dock
 |-|-|-|
 | `BINGE_LISTEN_ADDR` | `127.0.0.1:7878` | Address to bind |
 | `BINGE_DB_PATH` | `binge-server.db` | SQLite file location |
-| `BINGE_ALLOWED_ORIGIN` | `*` | CORS allowlist. Set to your Stash URL (e.g. `http://localhost:9999`) for `/config` lockdown |
+| `BINGE_ALLOWED_ORIGIN` | _(unset)_ | Extra CORS origins. Loopback/private/tailnet are auto-allowed; set this only for a **public** Stash origin (e.g. `https://stash.example.com`), comma-separated. `*` is ignored. |
 | `BINGE_POLL_INTERVAL` | `4h` | How often to poll Reddit |
 | `BINGE_PERFORMER_SYNC_INTERVAL` | `24h` | How often to re-scan Stash for new performer Reddit URLs |
 | `STASH_URL` | `http://localhost:9999` | Initial-seed-only — overrideable via UI |

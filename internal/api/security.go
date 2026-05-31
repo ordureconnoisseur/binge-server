@@ -8,9 +8,9 @@ import (
 
 // parseOrigins splits a comma-separated BINGE_ALLOWED_ORIGIN value into a
 // normalised allowlist. A literal "*" is intentionally dropped — wildcard
-// CORS on a credential-writing API is unsafe, so "*" now means "no
-// cross-origin browser access" (loopback is still permitted). Cross-host
-// setups must name their Stash origin(s) explicitly.
+// CORS on a credential-writing API is unsafe. This list is only needed for
+// PUBLIC Stash origins (a real domain behind a reverse proxy); loopback /
+// private / tailnet origins are allowed automatically (see originAllowed).
 func parseOrigins(s string) []string {
 	var out []string
 	for _, p := range strings.Split(s, ",") {
@@ -23,15 +23,21 @@ func parseOrigins(s string) []string {
 }
 
 // originAllowed reports whether a request's Origin header may be honoured.
-// An empty Origin (curl, the native iOS app, server-to-server) is allowed
-// — CORS/CSRF only applies to browsers, which always send Origin on
-// cross-origin requests. A loopback Origin is always allowed (same-host
-// Stash). Otherwise the Origin must exactly match a configured entry.
+// Allowed when:
+//   - there's no Origin (curl / the native iOS app / server-to-server —
+//     CORS/CSRF is a browser-only concern), or
+//   - the Origin's host is loopback / private / tailnet (a self-hosted
+//     Stash on a trusted network — the common case, ZERO config), or
+//   - the Origin exactly matches a configured allowlist entry (needed only
+//     when Stash is served from a PUBLIC origin, e.g. a real domain).
+//
+// A malicious public web page (https://evil.com) has a public Origin and
+// matches none of these, so browser CSRF stays blocked.
 func originAllowed(origin string, allowed []string) bool {
 	if origin == "" {
 		return true
 	}
-	if isLoopbackOrigin(origin) {
+	if isPrivateOrigin(origin) {
 		return true
 	}
 	for _, a := range allowed {
@@ -42,13 +48,12 @@ func originAllowed(origin string, allowed []string) bool {
 	return false
 }
 
-func isLoopbackOrigin(origin string) bool {
+func isPrivateOrigin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
 	}
-	host := u.Hostname()
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return isPrivateHost(u.Hostname())
 }
 
 // stashURLAllowed restricts the Stash destination to loopback / private /
@@ -61,11 +66,22 @@ func stashURLAllowed(raw string) bool {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	host := strings.ToLower(u.Hostname())
+	return isPrivateHost(u.Hostname())
+}
+
+// isPrivateHost reports whether a hostname is loopback, an RFC1918 private
+// IP, Tailscale CGNAT (100.64/10), a .local/.internal/.ts.net name, or a
+// bare LAN hostname (no dot). Public IPs and public FQDNs return false.
+func isPrivateHost(host string) bool {
+	host = strings.ToLower(host)
 	if host == "" {
 		return false
 	}
-	// Local + tailnet hostnames.
+	// IP literal? Classify by range (handles IPv4 + IPv6).
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || isCGNAT(ip)
+	}
+	// Local / tailnet hostnames.
 	if host == "localhost" ||
 		strings.HasSuffix(host, ".local") ||
 		strings.HasSuffix(host, ".internal") ||
@@ -74,16 +90,7 @@ func stashURLAllowed(raw string) bool {
 	}
 	// A bare hostname (no dot) is a LAN/tailnet machine name, not a
 	// public FQDN — allow it.
-	if !strings.Contains(host, ".") {
-		return true
-	}
-	// IP literals: loopback, RFC1918 private, or Tailscale CGNAT.
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || isCGNAT(ip)
-	}
-	// A dotted hostname that isn't a recognised local/tailnet suffix is
-	// treated as public and rejected.
-	return false
+	return !strings.Contains(host, ".")
 }
 
 var cgnatNet = func() *net.IPNet {
