@@ -144,4 +144,4 @@ The Reddit + Stash clients accept runtime credential swaps via `SetCookie` / `Se
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+AGPL-3.0. See [LICENSE](./LICENSE). (Matches Stash's own license.)
