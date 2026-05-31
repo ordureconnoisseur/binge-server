@@ -186,7 +186,7 @@ func (c *Client) fetchListing(ctx context.Context, endpoint string) ([]Post, err
 	case 429:
 		return nil, ErrRateLimit
 	default:
-		raw, _ := io.ReadAll(resp.Body)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MB cap
 		return nil, fmt.Errorf("reddit %d: %s", resp.StatusCode, raw)
 	}
 

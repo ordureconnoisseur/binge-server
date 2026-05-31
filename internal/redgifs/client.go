@@ -54,7 +54,7 @@ func (c *Client) ensureToken(ctx context.Context) error {
 		return fmt.Errorf("redgifs token request: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MB cap
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("redgifs token %d: %s", resp.StatusCode, raw)
 	}
@@ -112,7 +112,7 @@ func (c *Client) Resolve(ctx context.Context, slug string) (Resolved, error) {
 	case 404, 410:
 		return Resolved{}, ErrNotFound
 	default:
-		raw, _ := io.ReadAll(resp.Body)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MB cap
 		return Resolved{}, fmt.Errorf("redgifs %d: %s", resp.StatusCode, raw)
 	}
 

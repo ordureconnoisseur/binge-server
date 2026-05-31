@@ -360,7 +360,7 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
 	_ = json.Unmarshal(raw, &wrap)
 	if len(wrap.Errors) > 0 {
 		return errors.New(wrap.Errors[0].Message)
@@ -394,7 +394,7 @@ func probeRedditCookie(ctx context.Context, cookie string) error {
 	// The /api/me.json endpoint returns "{}" for anonymous sessions
 	// (no cookie / expired cookie) and the user's account JSON when
 	// authenticated. We treat empty `{}` as "not authenticated."
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("{}")) {
 		return errors.New("session returned anonymous response")
 	}

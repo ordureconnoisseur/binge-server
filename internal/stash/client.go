@@ -69,7 +69,7 @@ func (c *Client) do(ctx context.Context, query string, vars map[string]any, out 
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64 MB cap
 	if err != nil {
 		return err
 	}
