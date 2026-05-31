@@ -118,10 +118,12 @@ func loadConfig() config {
 		redditUserAgent:       ua + " " + Version,
 		pollInterval:          envDuration("BINGE_POLL_INTERVAL", 4*time.Hour),
 		performerSyncInterval: envDuration("BINGE_PERFORMER_SYNC_INTERVAL", 24*time.Hour),
-		// Default "*" keeps the existing Docker deploy working. The
-		// public README sets this to http://localhost:9999 to lock
-		// the daemon to same-origin POSTs from Stash.
-		allowedOrigin: envOr("BINGE_ALLOWED_ORIGIN", "*"),
+		// CORS allowlist. Defaults to localhost:9999 (same-host Stash);
+		// loopback is always permitted. Cross-host deploys MUST set this
+		// to their Stash browser origin (comma-separated list allowed) —
+		// a literal "*" is ignored (wildcard CORS on a credential API is
+		// unsafe), so cross-origin browser access fails closed.
+		allowedOrigin: envOr("BINGE_ALLOWED_ORIGIN", "http://localhost:9999"),
 	}
 }
 

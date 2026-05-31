@@ -36,7 +36,7 @@ type Server struct {
 	refreshMu     sync.Mutex
 	lastRefreshAt time.Time
 
-	allowedOrigin string // CORS allowlist; "*" disables strict checking
+	allowedOrigins []string // CORS allowlist (parsed); loopback always OK
 }
 
 // refreshCooldown — minimum time between /reddit/refresh-triggered
@@ -45,11 +45,11 @@ const refreshCooldown = 30 * time.Second
 
 func New(db *sql.DB, store *configstore.Store, poller Poller, log *slog.Logger, allowedOrigin string) *Server {
 	return &Server{
-		db:            db,
-		store:         store,
-		poller:        poller,
-		log:           log,
-		allowedOrigin: allowedOrigin,
+		db:             db,
+		store:          store,
+		poller:         poller,
+		log:            log,
+		allowedOrigins: parseOrigins(allowedOrigin),
 	}
 }
 
@@ -243,15 +243,15 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 // failure the entire request is rejected.
 
 type configGetResponse struct {
-	StashURL         string `json:"stashUrl"`
-	StashAPIKeySet   bool   `json:"stashApiKeySet"`
-	RedditCookieSet  bool   `json:"redditCookieSet"`
+	StashURL        string `json:"stashUrl"`
+	StashAPIKeySet  bool   `json:"stashApiKeySet"`
+	RedditCookieSet bool   `json:"redditCookieSet"`
 }
 
 type configPostRequest struct {
-	StashURL             *string `json:"stashUrl,omitempty"`
-	StashAPIKey          *string `json:"stashApiKey,omitempty"`
-	RedditSessionCookie  *string `json:"redditSessionCookie,omitempty"`
+	StashURL            *string `json:"stashUrl,omitempty"`
+	StashAPIKey         *string `json:"stashApiKey,omitempty"`
+	RedditSessionCookie *string `json:"redditSessionCookie,omitempty"`
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
@@ -263,9 +263,25 @@ func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
+	// Block cross-origin browser writes (CSRF) — a malicious page must
+	// not be able to POST credentials here. Non-browser callers (the iOS
+	// app, curl) send no Origin and are allowed; the web plugin must have
+	// its Stash origin in BINGE_ALLOWED_ORIGIN.
+	if !originAllowed(r.Header.Get("Origin"), s.allowedOrigins) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked; set BINGE_ALLOWED_ORIGIN to your Stash origin"})
+		return
+	}
 	var req configPostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+
+	// Restrict the Stash destination to loopback/private/tailnet so a
+	// config write can't repoint the stored API key at a public host
+	// (credential exfiltration). Public IPs / FQDNs are rejected.
+	if req.StashURL != nil && *req.StashURL != "" && !stashURLAllowed(*req.StashURL) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stashUrl must be a loopback, private, or tailnet address"})
 		return
 	}
 
@@ -547,6 +563,10 @@ func (s *Server) redditFeed(w http.ResponseWriter, r *http.Request) {
 // ── /reddit/refresh ───────────────────────────────────────────────────
 
 func (s *Server) redditRefresh(w http.ResponseWriter, r *http.Request) {
+	if !originAllowed(r.Header.Get("Origin"), s.allowedOrigins) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked"})
+		return
+	}
 	s.refreshMu.Lock()
 	if time.Since(s.lastRefreshAt) < refreshCooldown {
 		s.refreshMu.Unlock()
@@ -594,10 +614,10 @@ func nullStr(n sql.NullString) *string {
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		switch {
-		case s.allowedOrigin == "*":
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		case origin != "" && origin == s.allowedOrigin:
+		// Never echo "*": this API writes credentials, so wildcard CORS
+		// is unsafe. Echo the Origin only when it's explicitly allowed
+		// (configured allowlist) or loopback (same-host Stash).
+		if origin != "" && originAllowed(origin, s.allowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 		}
