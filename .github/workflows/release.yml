@@ -19,9 +19,45 @@ permissions:
   packages: write   # for ghcr.io push
 
 jobs:
+  # Creates the release ONCE, before any uploader runs.
+  #
+  # Previously all five matrix jobs called action-gh-release with
+  # generate_release_notes, so each raced to create the same release. Two
+  # things broke on v0.2.0: one job lost the race outright ("Resource not
+  # accessible by integration" — the darwin/arm64 binary was missing until
+  # a manual re-run), and the generated notes overwrote the annotated tag
+  # message, so the release page showed a duplicated "Full Changelog" line
+  # instead of the security + upgrade notice. Create it here, upload to it
+  # below.
+  create_release:
+    name: create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the tag object for its annotation
+
+      # The annotated tag message IS the release notes — it's written
+      # deliberately at tag time and says more than generated notes can.
+      - name: Build release notes from the tag annotation
+        run: |
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > NOTES.md
+          PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "${PREV}" ]; then
+            echo "" >> NOTES.md
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV}...${GITHUB_REF_NAME}" >> NOTES.md
+          fi
+          cat NOTES.md
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: NOTES.md
+
   binaries:
     name: build binary (${{ matrix.goos }}-${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    needs: create_release
     strategy:
       fail-fast: false
       matrix:
@@ -79,13 +115,16 @@ jobs:
             tar -czvf "../${NAME}.tar.gz" "${NAME}"
           fi
 
+      # Attach assets only. The release already exists (needs:
+      # create_release) and its notes are already correct, so neither
+      # generate_release_notes nor a body is set here — that's what
+      # clobbered the tag annotation before.
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             binge-server_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
             binge-server_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
-          generate_release_notes: true
 
   docker:
     name: docker image (multi-arch)
