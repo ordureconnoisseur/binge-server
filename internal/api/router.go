@@ -83,6 +83,10 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(s.corsMiddleware)
+	// After CORS so preflights still get their headers, before every
+	// route so a new endpoint is guarded by default rather than by
+	// remembering to guard it.
+	r.Use(s.authMiddleware)
 	r.Get("/healthz", s.healthz)
 	r.Get("/config", s.getConfig)
 	r.Post("/config", s.postConfig)
@@ -716,7 +720,9 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// ApiKey must be listed or the browser's preflight rejects every
+		// authenticated call before it is sent.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, ApiKey, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
