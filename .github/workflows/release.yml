@@ -41,7 +41,25 @@ jobs:
       # deliberately at tag time and says more than generated notes can.
       - name: Build release notes from the tag annotation
         run: |
-          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > NOTES.md
+          # actions/checkout materialises the pushed tag as a LIGHTWEIGHT
+          # ref, even at fetch-depth 0. On a lightweight tag %(contents)
+          # silently yields the tagged COMMIT's message instead of the
+          # annotation, which is how v0.2.1 shipped with a commit message
+          # as its release notes. Re-fetch the tag explicitly to get the
+          # real tag object.
+          git fetch --force origin \
+            "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" || true
+
+          # Only an annotated tag has a tag object; anything else means the
+          # notes would be a commit message wearing a release's clothes, so
+          # say so loudly rather than shipping it quietly again.
+          if [ "$(git cat-file -t "${GITHUB_REF_NAME}" 2>/dev/null)" = "tag" ]; then
+            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > NOTES.md
+          else
+            echo "::warning::${GITHUB_REF_NAME} is not an annotated tag - release notes fall back to the commit message. Tag with 'git tag -a' to write real notes."
+            git log -1 --format='%B' > NOTES.md
+          fi
+
           PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "${PREV}" ]; then
             echo "" >> NOTES.md
