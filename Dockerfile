@@ -47,4 +47,10 @@ ENV BINGE_DB_PATH=/data/binge-server.db
 ENV BINGE_LISTEN_ADDR=0.0.0.0:7878
 EXPOSE 7878
 
+# Lets compose/orchestrators tell "container is up" from "daemon is
+# actually serving" — the two diverge on a bad mount or a port clash.
+# /healthz is unauthenticated and cheap (a few COUNT(*)s). python is
+# already in this image for gallery-dl, so no extra install for curl.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7878/healthz', timeout=4).status==200 else 1)"
+
 ENTRYPOINT ["binge-server"]

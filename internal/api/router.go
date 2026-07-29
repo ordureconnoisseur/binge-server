@@ -32,6 +32,11 @@ type Poller interface {
 }
 
 type Server struct {
+	// Build version, surfaced by /healthz so you can tell what's running
+	// without shell access to the box — the first question on any bug
+	// report, and the way to spot a deploy that didn't actually restart.
+	version string
+
 	db      *sql.DB
 	store   *configstore.Store
 	poller  Poller
@@ -233,6 +238,10 @@ func (s *Server) proxyReddit(w http.ResponseWriter, r *http.Request) {
 
 // ── /healthz ──────────────────────────────────────────────────────────
 
+// SetVersion records the build version for /healthz. Called once at
+// startup; not safe to call concurrently with serving.
+func (s *Server) SetVersion(v string) { s.version = v }
+
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	state := map[string]string{}
 	rows, err := s.db.QueryContext(r.Context(), `SELECT key, value FROM sync_state`)
@@ -253,6 +262,7 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		s.store.Get(configstore.KeyRedditCookie) != ""
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
+		"version":           s.version,
 		"configured":        configured,
 		"lastPerformerSync": state["last_performer_sync"],
 		"lastPoll":          state["last_poll"],

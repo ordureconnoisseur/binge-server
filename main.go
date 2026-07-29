@@ -32,11 +32,24 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	log.Info("binge-server starting", "version", Version)
 
-	cfg := loadConfig()
+	cfg := loadConfig(log)
+
+	// Create the DB's parent directory up front. Without this, pointing
+	// BINGE_DB_PATH at an unmounted volume (the usual Docker slip: setting
+	// /data/binge-server.db but forgetting -v) fails deep inside SQLite as
+	// "unable to open database file", which reads like corruption rather
+	// than a missing mount.
+	if dir := filepath.Dir(cfg.dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Error("create db directory — is the volume mounted and writable?",
+				"dir", dir, "err", err)
+			os.Exit(1)
+		}
+	}
 
 	database, err := db.Open(cfg.dbPath)
 	if err != nil {
-		log.Error("open db", "err", err)
+		log.Error("open db", "path", cfg.dbPath, "err", err)
 		os.Exit(1)
 	}
 	defer database.Close()
@@ -95,6 +108,7 @@ func main() {
 	)
 
 	server := api.New(database, store, pollerSvc, stashClient, twitterClient, saverSvc, pornhubClient, log.With("component", "api"), cfg.allowedOrigin)
+	server.SetVersion(Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -143,7 +157,7 @@ type config struct {
 	allowedOrigin         string
 }
 
-func loadConfig() config {
+func loadConfig(log *slog.Logger) config {
 	ua := envOr("REDDIT_USER_AGENT", "binge-server/0.2")
 	return config{
 		listenAddr:            envOr("BINGE_LISTEN_ADDR", "127.0.0.1:7878"),
@@ -156,11 +170,11 @@ func loadConfig() config {
 		socialWriteRoot:       os.Getenv("BINGE_SOCIAL_WRITE_ROOT"),
 		socialStashRoot:       os.Getenv("BINGE_SOCIAL_STASH_ROOT"),
 		redditUserAgent:       ua + " " + Version,
-		pollInterval:          envDuration("BINGE_POLL_INTERVAL", 4*time.Hour),
-		performerSyncInterval: envDuration("BINGE_PERFORMER_SYNC_INTERVAL", 24*time.Hour),
+		pollInterval:          envDuration(log, "BINGE_POLL_INTERVAL", 4*time.Hour),
+		performerSyncInterval: envDuration(log, "BINGE_PERFORMER_SYNC_INTERVAL", 24*time.Hour),
 		// PornHub polling is heavier (yt-dlp per performer), so default to
 		// a longer cadence than reddit.
-		pornhubPollInterval: envDuration("BINGE_PORNHUB_POLL_INTERVAL", 12*time.Hour),
+		pornhubPollInterval: envDuration(log, "BINGE_PORNHUB_POLL_INTERVAL", 12*time.Hour),
 		// CORS allowlist. Loopback / private / tailnet Stash origins are
 		// allowed automatically (zero config for the common self-hosted
 		// case). Set this only when Stash is served from a PUBLIC origin
@@ -178,13 +192,24 @@ func envOr(key, def string) string {
 	return def
 }
 
-func envDuration(key string, def time.Duration) time.Duration {
+func envDuration(log *slog.Logger, key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		// Silently falling back hides typos like "4hr" or "240" for hours:
+		// the daemon then polls on a cadence the operator didn't choose and
+		// has no way to notice. Say so and carry on with the default.
+		log.Warn("ignoring unparseable duration, using default",
+			"key", key, "value", v, "default", def,
+			"hint", "use Go duration syntax, e.g. 30m, 4h, 12h")
+		return def
+	}
+	if d <= 0 {
+		log.Warn("ignoring non-positive duration, using default",
+			"key", key, "value", v, "default", def)
 		return def
 	}
 	return d

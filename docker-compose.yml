@@ -1,0 +1,56 @@
+# binge-server — drop this next to nothing else and `docker compose up -d`.
+#
+# Defaults are the common self-hosted case: Stash on the same machine,
+# binge reached from a browser on your LAN or tailnet. Nothing here is
+# required reading; the two things worth a look are the port bind and
+# BINGE_SOCIAL_WRITE_ROOT.
+
+services:
+  binge-server:
+    image: ghcr.io/ordureconnoisseur/binge-server:latest
+    container_name: binge-server
+    restart: unless-stopped
+
+    ports:
+      # Host-only by default, which is right when Stash runs on this same
+      # machine. Change to "7878:7878" to reach it from elsewhere on your
+      # LAN or tailnet — the daemon holds your Stash API key, so don't
+      # expose it to the internet.
+      - "127.0.0.1:7878:7878"
+
+    volumes:
+      # SQLite DB + the generated gallery-dl cookie config.
+      - ./data:/data
+
+      # Save to Stash only. Mount the library path you want saved media
+      # written into, then set the two roots below. Leave both commented
+      # out and Save simply stays off.
+      # - /path/to/your/library/social:/media/social
+
+    # Uncomment the `environment:` key below along with whichever
+    # settings you need — a bare `environment:` with everything commented
+    # out is a compose error ("must be a mapping"), not an empty block.
+    #
+    # environment:
+    #   # Where POST /save writes, as this container sees it.
+    #   - BINGE_SOCIAL_WRITE_ROOT=/media/social
+    #   # The same location as STASH sees it. These differ whenever Stash
+    #   # is on the host (or another container) with a different mount —
+    #   # getting this wrong is why saved files import with broken paths.
+    #   - BINGE_SOCIAL_STASH_ROOT=/path/to/your/library/social
+    #
+    #   # Only needed when Stash is served from a PUBLIC domain behind a
+    #   # reverse proxy. Loopback, LAN and tailnet origins are allowed
+    #   # automatically.
+    #   - BINGE_ALLOWED_ORIGIN=https://stash.example.com
+    #
+    #   # Poll cadences. Go duration syntax (30m, 4h, 12h). PornHub is
+    #   # heavier per performer, hence the longer default.
+    #   - BINGE_POLL_INTERVAL=4h
+    #   - BINGE_PORNHUB_POLL_INTERVAL=12h
+    #   - BINGE_PERFORMER_SYNC_INTERVAL=24h
+
+    # Credentials are NOT set here. Stash's API key is auto-detected and
+    # the Reddit / X cookies are pasted in binge → Settings →
+    # "binge-server configuration", so they live in the SQLite volume and
+    # can be rotated without touching this file or restarting.

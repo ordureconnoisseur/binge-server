@@ -25,7 +25,25 @@ The same reasoning covers the other pillars: X needs session cookies a browser p
 
 ## Install
 
-### Option 1 — Docker (recommended)
+### Option 1 — Docker Compose (recommended)
+
+Grab [`docker-compose.yml`](./docker-compose.yml) and:
+
+```bash
+docker compose up -d
+```
+
+That's the whole install. The defaults cover the common case (Stash on the same machine); the comments in the file flag the two things worth a look, the port bind and the Save-to-Stash paths.
+
+The container ships a real healthcheck, so `docker ps` distinguishes "running" from "actually serving":
+
+```bash
+docker compose ps                      # STATUS shows (healthy)
+curl -s localhost:7878/healthz | jq    # version, config state, counts
+```
+
+<details>
+<summary>Or plain <code>docker run</code></summary>
 
 ```bash
 docker run -d \
@@ -33,11 +51,14 @@ docker run -d \
   --restart unless-stopped \
   -p 127.0.0.1:7878:7878 \
   -v ~/binge-server-data:/data \
-  -e BINGE_DB_PATH=/data/binge-server.db \
   ghcr.io/ordureconnoisseur/binge-server:latest
 ```
 
-The bind `127.0.0.1:7878` keeps the daemon reachable only from the same machine. Drop the `127.0.0.1:` prefix if you need to expose it to your LAN.
+`BINGE_DB_PATH` already defaults to `/data/binge-server.db` in the image, so it only needs setting if you want the DB elsewhere.
+
+</details>
+
+The bind `127.0.0.1:7878` keeps the daemon reachable only from the same machine. Drop the `127.0.0.1:` prefix if you need to expose it to your LAN or tailnet — but not to the internet, since the daemon holds your Stash API key.
 
 **CORS / credentials:** the daemon protects its credential-writing endpoints against cross-origin browser attacks. Stash served from **localhost, a LAN IP, or a Tailscale host is allowed automatically** — no config needed. You only need to set `BINGE_ALLOWED_ORIGIN` (to your Stash origin, e.g. `https://stash.example.com`) when Stash is served from a **public domain** behind a reverse proxy.
 
@@ -101,7 +122,7 @@ These are stored in SQLite (`binge-server.db`, in `/data` if you mounted the Doc
 | `BINGE_DB_PATH` | `binge-server.db` | SQLite file location |
 | `BINGE_ALLOWED_ORIGIN` | _(unset)_ | Extra CORS origins. Loopback/private/tailnet are auto-allowed; set this only for a **public** Stash origin (e.g. `https://stash.example.com`), comma-separated. `*` is ignored. |
 | `BINGE_POLL_INTERVAL` | `4h` | How often to poll Reddit |
-| `BINGE_PORNHUB_POLL_INTERVAL` | `4h` | How often to poll PornHub |
+| `BINGE_PORNHUB_POLL_INTERVAL` | `12h` | How often to poll PornHub (heavier than Reddit — yt-dlp per performer) |
 | `BINGE_SOCIAL_WRITE_ROOT` | _(unset)_ | Where `POST /save` writes downloaded media. Save is disabled until this is set |
 | `BINGE_SOCIAL_STASH_ROOT` | _(unset)_ | The same location as Stash sees it, when the daemon's path differs (e.g. in Docker) |
 | `BINGE_PERFORMER_SYNC_INTERVAL` | `24h` | How often to re-scan Stash for new performer Reddit URLs |
@@ -136,7 +157,7 @@ The full re-scan happens every 24 hours by default. Add a Reddit URL to a perfor
 
 | Method | Path | Description |
 |-|-|-|
-| GET | `/healthz` | `{ ok, configured, lastPerformerSync, lastPoll, performerCount, postCount }` |
+| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
 | GET | `/config` | Public shape of stored config — booleans for which secrets are set, never the values |
 | POST | `/config` | Body: `{stashUrl?, stashApiKey?, redditSessionCookie?}`. Validates each non-empty field against the live service before persisting |
 | GET | `/reddit/stories?sinceUtc=N` | Per-performer digest, used by binge's stories row |
