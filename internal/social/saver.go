@@ -141,9 +141,21 @@ func (s *Saver) Save(ctx context.Context, req SaveRequest) (*SaveResult, error) 
 	}
 	filename := base + "." + ext
 
-	src := strings.ToLower(req.Source)
+	// `src` is caller-supplied and reaches filepath.Join, which CLEANS a
+	// path but does not CONFINE it: Join("/lib/social", "../../etc", h)
+	// resolves to /etc/h. handle and base were already sanitised; this one
+	// was missed, which made the write location caller-chosen.
+	src := stash.SanitizeSegment(strings.ToLower(req.Source))
 	writeDir := filepath.Join(writeRoot, src, handle)
 	writePath := filepath.Join(writeDir, filename)
+
+	// Belt-and-braces: whatever the segments were, refuse to write outside
+	// the configured root. Cheap, and it catches the next missed sanitise
+	// rather than relying on every future call site remembering.
+	if !underRoot(writeRoot, writePath) {
+		return nil, fmt.Errorf(
+			"refusing to write outside the library root: %s", writePath)
+	}
 
 	// Build the Stash-side path with the separator implied by stashRoot
 	// (Windows Stash = backslash, Linux = forward slash).
@@ -310,4 +322,23 @@ func dateFromUnix(ts int64) string {
 		return ""
 	}
 	return time.Unix(ts, 0).UTC().Format("2006-01-02")
+}
+
+// underRoot reports whether path is inside root after both are cleaned and
+// made absolute. Uses filepath.Rel rather than a string prefix so that
+// "/libraryX" is not treated as inside "/library".
+func underRoot(root, path string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

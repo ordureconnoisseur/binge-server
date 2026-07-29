@@ -329,7 +329,11 @@ var phThumbHTTP = &http.Client{Timeout: 20 * time.Second}
 func (s *Server) pornhubThumb(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("url")
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || !strings.HasSuffix(strings.ToLower(u.Host), "phncdn.com") {
+	// Leading dot matters: without it "myevilphncdn.com" — a
+	// registrable domain — satisfies the suffix check.
+	host := strings.ToLower(u.Hostname())
+	if err != nil || u.Scheme != "https" ||
+		!(host == "phncdn.com" || strings.HasSuffix(host, ".phncdn.com")) {
 		http.Error(w, "host not allowed", http.StatusForbidden)
 		return
 	}
