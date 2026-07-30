@@ -45,7 +45,13 @@ var handleRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 
 // reXHandle pulls a handle out of a twitter.com / x.com profile URL.
 // Skips reserved path segments that aren't real profiles.
-var reXHandle = regexp.MustCompile(`(?i)(?:twitter|x)\.com/([A-Za-z0-9_]{1,15})(?:[/?#]|$)`)
+//
+// The leading (?:^|[./]) is load-bearing: "x.com" is a suffix of plenty of
+// unrelated hosts, and without a host boundary this matched inside them.
+// indexxx.com/m/<name> became @m and pornbox.com/application/model/<id>
+// became @application — 119 of 1087 performers in one real library, most
+// of which then fetched some stranger's media instead of nothing.
+var reXHandle = regexp.MustCompile(`(?i)(?:^|[./])(?:twitter|x)\.com/([A-Za-z0-9_]{1,15})(?:[/?#]|$)`)
 
 var xReserved = map[string]bool{
 	"home": true, "search": true, "explore": true, "notifications": true,
