@@ -30,10 +30,21 @@ RUN go build -trimpath \
 # rebuild pulls the current versions that fix it. curl_cffi gives yt-dlp
 # the browser TLS impersonation PornHub demands (410s without it); ffmpeg
 # is for any HLS-only PornHub download/merge.
+#
+# curl_cffi comes from yt-dlp's own extra rather than as a bare package.
+# It is not a peer of yt-dlp but a dependency of it, and yt-dlp accepts
+# only a window of versions (currently 0.5.10 and 0.10.x–0.15.x). Asking
+# for it separately let pip resolve 0.16.0, which yt-dlp refused to load
+# — leaving impersonation quietly switched off and every PornHub poll
+# failing, on nothing worse than an image rebuild.
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir gallery-dl yt-dlp curl_cffi
+    && pip install --no-cache-dir gallery-dl "yt-dlp[curl-cffi]" \
+    # Fail the build here rather than ship a daemon that looks healthy and
+    # cannot fetch a single video. This import is exactly what yt-dlp does
+    # at runtime, and it raises when the pairing is wrong.
+    && python -c "import yt_dlp.networking._curlcffi"
 COPY --from=build /out/binge-server /usr/local/bin/binge-server
 
 # Persistent data (SQLite + the generated gallery-dl cookie config).
