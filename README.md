@@ -79,8 +79,8 @@ Each tagged release on [GitHub Releases](https://github.com/ordureconnoisseur/bi
 Unpack and run:
 
 ```bash
-tar -xzf binge-server_v0.2.0_linux_amd64.tar.gz
-cd binge-server_v0.2.0_linux_amd64
+tar -xzf binge-server_v0.3.0_linux_amd64.tar.gz
+cd binge-server_v0.3.0_linux_amd64
 ./binge-server
 ```
 
@@ -88,7 +88,7 @@ The Docker image is also published to GHCR alongside each release:
 
 ```bash
 docker pull ghcr.io/ordureconnoisseur/binge-server:latest
-docker pull ghcr.io/ordureconnoisseur/binge-server:v0.2.0
+docker pull ghcr.io/ordureconnoisseur/binge-server:v0.3.0
 ```
 
 ### Option 3 — Build from source
