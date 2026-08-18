@@ -312,6 +312,11 @@ func (p *Poller) PollAll(ctx context.Context) error {
 	}
 
 	inserted := 0
+	// Cookie expiry is the one failure users hit months after setup, and
+	// on its own it is invisible: stories simply stop arriving. Record it
+	// so /config can say so, rather than leaving it in a log nobody reads.
+	expired := false
+	succeeded := 0
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -325,18 +330,40 @@ func (p *Poller) PollAll(ctx context.Context) error {
 			}
 			if errors.Is(err, reddit.ErrCookieExpired) {
 				p.log.Error("Reddit session cookie invalid or expired — refresh it via the binge settings page")
+				expired = true
 				break
 			}
 			p.log.Warn("poll performer failed", "stash_id", t.StashID, "handle", t.Handle, "err", err)
 			continue
 		}
+		succeeded++
 		time.Sleep(perRequestSleep)
 	}
+	// Only a fetch that actually worked clears the flag. Bailing out on a
+	// rate limit before reaching anyone tells us nothing about the cookie,
+	// and clearing on that would flap the warning off and on.
+	p.setCookieExpired(ctx, expired, succeeded > 0)
 
 	_, _ = p.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('last_poll', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, time.Now().UTC().Format(time.RFC3339))
 	p.log.Info("poll cycle done", "performers", len(targets), "new_posts", inserted, "elapsed", time.Since(start))
 	return nil
+}
+
+// setCookieExpired records or clears the "reddit cookie is dead" marker
+// in sync_state. Stored as the RFC3339 time it was first noticed, so the
+// UI can say when stories stopped rather than just that they have.
+func (p *Poller) setCookieExpired(ctx context.Context, expired, sawSuccess bool) {
+	if expired {
+		// First sighting wins: keep the original timestamp across ticks
+		// so "since" does not reset to now on every failed cycle.
+		_, _ = p.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_state(key,value)
+			VALUES('reddit_cookie_expired_at', ?)`, time.Now().UTC().Format(time.RFC3339))
+		return
+	}
+	if sawSuccess {
+		_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
+	}
 }
 
 func (p *Poller) pollOne(ctx context.Context, t pollTarget) (int, error) {

@@ -107,7 +107,9 @@ Requires Go 1.22+. SQLite is embedded via `modernc.org/sqlite` — no CGO needed
 Credentials, all set from binge → Settings → "binge-server configuration":
 
 1. **Stash API key** — auto-detected from Stash's `configuration.general.apiKey` query. Binge fills this in for you when the configuration card first loads.
-2. **Reddit session cookie** — has to be pasted manually because cookies live in a different browser origin than Stash. Expand "How to find your Reddit cookie" for the four-step instructions. Cookies expire every few months; repeat when stories stop updating.
+2. **Reddit session cookie** — has to be pasted manually because cookies live in a different browser origin than Stash. Fastest route is the **Import cookies.txt** button at the top of the card: export cookies from a browser signed into Reddit and X, pick the file, and it fills both pillars in one step. It is parsed in your browser and only the Reddit and X values are sent. Otherwise expand "How to find your Reddit cookie" for the manual four-step version.
+
+   Cookies expire every few months. When that happens the daemon notices on its next poll and the settings card says so, with the date stories stopped updating — paste a fresh cookie to clear it.
 3. **X cookies** (`auth_token` + `ct0`) — only for the X pillar, and only together: `auth_token` is useless without `ct0`. Same rotation caveat as Reddit.
 
 PornHub needs no credentials. Save additionally needs a write path — see `BINGE_SOCIAL_WRITE_ROOT` below.
@@ -157,7 +159,7 @@ The full re-scan happens every 24 hours by default. Add a Reddit URL to a perfor
 
 | Method | Path | Description |
 |-|-|-|
-| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
+| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, redditCookieExpiredAt, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
 | GET | `/config` | Public shape of stored config — booleans for which secrets are set, never the values |
 | POST | `/config` | Body: `{stashUrl?, stashApiKey?, redditSessionCookie?}`. Validates each non-empty field against the live service before persisting |
 | GET | `/reddit/stories?sinceUtc=N` | Per-performer digest, used by binge's stories row |

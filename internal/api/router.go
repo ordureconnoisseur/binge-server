@@ -265,13 +265,14 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		s.store.Get(configstore.KeyStashAPIKey) != "" &&
 		s.store.Get(configstore.KeyRedditCookie) != ""
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                true,
-		"version":           s.version,
-		"configured":        configured,
-		"lastPerformerSync": state["last_performer_sync"],
-		"lastPoll":          state["last_poll"],
-		"performerCount":    performerCount,
-		"postCount":         postCount,
+		"ok":                    true,
+		"version":               s.version,
+		"configured":            configured,
+		"lastPerformerSync":     state["last_performer_sync"],
+		"lastPoll":              state["last_poll"],
+		"redditCookieExpiredAt": state["reddit_cookie_expired_at"],
+		"performerCount":        performerCount,
+		"postCount":             postCount,
 	})
 }
 
@@ -291,6 +292,11 @@ type configGetResponse struct {
 	StashAPIKeySet  bool   `json:"stashApiKeySet"`
 	RedditCookieSet bool   `json:"redditCookieSet"`
 	XCookiesSet     bool   `json:"xCookiesSet"`
+	// RFC3339 time the poller first found the Reddit cookie rejected,
+	// empty when it is working. A cookie set months ago goes stale with
+	// no visible symptom other than stories quietly stopping, so the UI
+	// needs to be told rather than the user having to guess.
+	RedditCookieExpiredAt string `json:"redditCookieExpiredAt,omitempty"`
 	// Social "save to Stash" library roots (not secret). Configured =
 	// both set.
 	SocialWriteRoot      string `json:"socialWriteRoot"`
@@ -310,7 +316,7 @@ type configPostRequest struct {
 	SocialStashRoot *string `json:"socialStashRoot,omitempty"`
 }
 
-func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, configGetResponse{
 		StashURL:             s.store.Get(configstore.KeyStashURL),
 		StashAPIKeySet:       s.store.Get(configstore.KeyStashAPIKey) != "",
@@ -319,7 +325,23 @@ func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
 		SocialWriteRoot:      s.store.Get(configstore.KeySocialWriteRoot),
 		SocialStashRoot:      s.store.Get(configstore.KeySocialStashRoot),
 		SocialSaveConfigured: s.saver != nil && s.saver.Configured(),
+		// Only meaningful while a cookie is actually stored: clearing the
+		// cookie should read as "not set up", not as "expired".
+		RedditCookieExpiredAt: func() string {
+			if s.store.Get(configstore.KeyRedditCookie) == "" {
+				return ""
+			}
+			return s.syncState(r.Context(), "reddit_cookie_expired_at")
+		}(),
 	})
+}
+
+// syncState reads one row from the poller's sync_state table. Missing key
+// and db error are both "" — callers treat absence as the healthy case.
+func (s *Server) syncState(ctx context.Context, key string) string {
+	var v string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM sync_state WHERE key = ?`, key).Scan(&v)
+	return v
 }
 
 func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
@@ -385,6 +407,11 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return
 		}
+		// This cookie was probed against reddit above, so it works now.
+		// Clear the expiry marker immediately rather than making the user
+		// stare at a stale warning until the next poll tick, up to 4h away.
+		_, _ = s.db.ExecContext(r.Context(),
+			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
 	}
 	// X cookies — both must be provided together (auth_token is useless
 	// without the matching ct0 csrf token). Persisted then pushed into the
