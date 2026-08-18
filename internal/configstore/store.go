@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	KeyStashURL      = "stash_url"
-	KeyStashAPIKey   = "stash_api_key"
-	KeyRedditCookie  = "reddit_session_cookie"
+	KeyStashURL     = "stash_url"
+	KeyStashAPIKey  = "stash_api_key"
+	KeyRedditCookie = "reddit_session_cookie"
 	// X (Twitter) session cookies — copied from a logged-in browser tab,
 	// same self-service-cookie pattern as the Reddit cookie above.
 	KeyXAuthToken = "x_auth_token"

@@ -42,8 +42,8 @@ type Poller struct {
 
 	// Rate-limit the "waiting for config" log line so a permanently
 	// unconfigured daemon doesn't fill logs with one entry per tick.
-	warnMu        sync.Mutex
-	lastWarnedAt  time.Time
+	warnMu       sync.Mutex
+	lastWarnedAt time.Time
 }
 
 func New(

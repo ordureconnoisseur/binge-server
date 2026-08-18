@@ -70,17 +70,17 @@ func (c *Client) currentCookie() string {
 // ErrSuspended — listing returned a suspended/notfound condition.
 // Poller marks the performer and stops scheduling them.
 var (
-	ErrSuspended    = errors.New("reddit handle suspended")
-	ErrNotFound     = errors.New("reddit handle not found")
-	ErrForbidden    = errors.New("reddit handle forbidden")
-	ErrRateLimit    = errors.New("reddit rate-limited")
+	ErrSuspended     = errors.New("reddit handle suspended")
+	ErrNotFound      = errors.New("reddit handle not found")
+	ErrForbidden     = errors.New("reddit handle forbidden")
+	ErrRateLimit     = errors.New("reddit rate-limited")
 	ErrCookieExpired = errors.New("reddit session cookie invalid or expired")
 )
 
 // Post mirrors the slice of Reddit's listing JSON we use.
 type Post struct {
-	ID         string  `json:"id"`        // base36 (no t3_ prefix)
-	Name       string  `json:"name"`      // full name "t3_<id>"
+	ID         string  `json:"id"`   // base36 (no t3_ prefix)
+	Name       string  `json:"name"` // full name "t3_<id>"
 	Subreddit  string  `json:"subreddit"`
 	Author     string  `json:"author"`
 	Title      string  `json:"title"`
@@ -208,13 +208,13 @@ func (c *Client) fetchListing(ctx context.Context, endpoint string) ([]Post, err
 // left empty here — the poller calls the redgifs resolver and fills
 // it in before persisting.
 type Class struct {
-	Kind          string // image | video | text | link
-	MediaURL      string
-	LinkURL       string
-	ThumbURL      string
-	Domain        string
-	NeedsRedgifs  bool
-	RedgifsSlug   string
+	Kind         string // image | video | text | link
+	MediaURL     string
+	LinkURL      string
+	ThumbURL     string
+	Domain       string
+	NeedsRedgifs bool
+	RedgifsSlug  string
 }
 
 // imageExts matches what Reddit serves directly as i.redd.it images.
@@ -237,9 +237,10 @@ func isRedgifsDomain(d string) bool {
 
 // extractRedgifsSlug parses the slug from a redgifs URL.
 // Examples that need to work:
-//   https://www.redgifs.com/watch/abcdefgxyz123       -> "abcdefgxyz123"
-//   https://www.redgifs.com/ifr/abcdefgxyz123          -> "abcdefgxyz123"
-//   https://redgifs.com/watch/abcdefgxyz123?queryjunk  -> "abcdefgxyz123"
+//
+//	https://www.redgifs.com/watch/abcdefgxyz123       -> "abcdefgxyz123"
+//	https://www.redgifs.com/ifr/abcdefgxyz123          -> "abcdefgxyz123"
+//	https://redgifs.com/watch/abcdefgxyz123?queryjunk  -> "abcdefgxyz123"
 func extractRedgifsSlug(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {

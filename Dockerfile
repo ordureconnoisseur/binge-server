@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Build stage ────────────────────────────────────────────────────
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.6-alpine AS build
 WORKDIR /src
 
 # Version is plumbed in via the release workflow's build-arg and

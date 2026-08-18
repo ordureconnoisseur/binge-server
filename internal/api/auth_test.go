@@ -14,9 +14,9 @@ func TestRequestFromPrivateIP(t *testing.T) {
 		{"127.0.0.1:5000", true},
 		{"192.168.1.20:5000", true},
 		{"10.0.0.5:5000", true},
-		{"100.101.45.18:5000", true},   // tailscale CGNAT
+		{"100.101.45.18:5000", true}, // tailscale CGNAT
 		{"[::1]:5000", true},
-		{"203.0.113.7:5000", false},    // public
+		{"203.0.113.7:5000", false}, // public
 		{"8.8.8.8:5000", false},
 		{"garbage", false},
 	}

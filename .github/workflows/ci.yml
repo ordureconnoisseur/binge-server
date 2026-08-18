@@ -1,0 +1,45 @@
+# Test, vet and vulnerability-scan on every push and PR. Until now the
+# only workflow was release.yml, which runs on tags, so nothing checked
+# a branch before it was cut into a release.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Satisfies the toolchain floor in go.mod. A lower version would
+          # auto-download the pinned one, but naming it keeps the log honest.
+          go-version: "1.26.6"
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      # The stdlib SSRF/URL-parsing surface this daemon leans on is exactly
+      # what these advisories touch, so a regression to a vulnerable
+      # toolchain floor should fail the build rather than ship.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
