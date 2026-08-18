@@ -359,6 +359,20 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The other half of the first-run exemption in authMiddleware. An
+	// unconfigured daemon reached from a public address may be claimed,
+	// but only by a request that establishes the Stash API key, which is
+	// probed against a private Stash below. Without this a caller could
+	// use the exemption to store a Reddit cookie and nothing else, and
+	// so occupy a daemon it never proved it owns.
+	if s.store.Get(configstore.KeyStashAPIKey) == "" && !requestFromPrivateIP(r) &&
+		(req.StashAPIKey == nil || *req.StashAPIKey == "") {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "the first request to an unconfigured binge-server reached from a public address must set the Stash API key",
+		})
+		return
+	}
+
 	// Restrict the Stash destination to loopback/private/tailnet so a
 	// config write can't repoint the stored API key at a public host
 	// (credential exfiltration). Public IPs / FQDNs are rejected.

@@ -57,16 +57,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// also what keeps first-run setup possible: POST /config has
 			// to be reachable before there is a key to present.
 			if !requestFromPrivateIP(r) {
-				// Say how to get out of this. Without the second
-				// sentence this is a dead end: every write is refused
-				// until a key is stored, and storing one is a write.
-				// Reaching the daemon over a tunnel or reverse proxy
-				// puts a public address in RemoteAddr, so a perfectly
-				// ordinary setup lands here on first run and the UI
-				// just sits on "Setting up..." forever.
+				// One exception, or this is a dead end: every route is
+				// refused until a key is stored, and storing one is a
+				// request. Reaching the daemon through a tunnel or a
+				// reverse proxy puts a public address in RemoteAddr, so
+				// an ordinary remote setup lands here on first run with
+				// no way forward.
+				//
+				// Claiming an unconfigured daemon this way requires
+				// presenting a Stash API key that the daemon can prove
+				// works, against a Stash URL that stashURLAllowed has
+				// already restricted to its own private network. An
+				// attacker on the internet cannot satisfy that without
+				// already holding a working key for a Stash they cannot
+				// reach; postConfig enforces it.
+				if r.Method == http.MethodPost && r.URL.Path == "/config" {
+					next.ServeHTTP(w, r)
+					return
+				}
 				writeJSON(w, http.StatusForbidden, map[string]string{
 					"error": "binge-server cannot be reached from a public IP until a Stash API key is configured. " +
-						"Seed one with the STASH_API_KEY environment variable, or open binge once from the daemon's own network (LAN or tailnet) to let it configure itself.",
+						"Open binge from your Stash and let it send the key, or seed one with the STASH_API_KEY environment variable.",
 				})
 				return
 			}
