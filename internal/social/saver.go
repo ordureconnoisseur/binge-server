@@ -250,6 +250,15 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// req.MediaURL is caller-supplied and flows into a yt-dlp argv
+	// (pornhub) or an http GET (everything else). Both are dangerous with
+	// an unvalidated string: a value like "--config-location=..." is read
+	// by yt-dlp as an option rather than a URL, and an arbitrary host is
+	// an SSRF sink. Require a real http(s) URL to a host the source is
+	// expected to serve, before either path sees it.
+	if err := validateMediaURL(req.Source, req.MediaURL); err != nil {
+		return err
+	}
 	// PornHub has no direct media URL — yt-dlp extracts + downloads the
 	// video from the watch page (req.MediaURL).
 	if strings.ToLower(req.Source) == "pornhub" {
@@ -290,6 +299,49 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	}
 	f.Close()
 	return os.Rename(tmp, dest)
+}
+
+// mediaHosts lists the hostnames each source is allowed to fetch from.
+// A save request naming a source may only pull media from that source's
+// own CDNs, which stops the download path being pointed at internal
+// addresses (169.254.169.254, the local Stash, other LAN services) and
+// stops a hostile value masquerading as a URL.
+var mediaHosts = map[string][]string{
+	"pornhub":   {"pornhub.com", "phncdn.com"},
+	"redgifs":   {"redgifs.com"},
+	"reddit":    {"redd.it", "redditmedia.com", "reddit.com"},
+	"x":         {"twimg.com", "twitter.com", "x.com"},
+	"twitter":   {"twimg.com", "twitter.com", "x.com"},
+	"instagram": {"cdninstagram.com", "fbcdn.net"},
+}
+
+// validateMediaURL rejects anything that is not an http(s) URL whose host
+// belongs to the named source. Host match is exact or a dotted-suffix, so
+// "evilpornhub.com" does not pass for "pornhub". A leading "-" cannot
+// survive url.Parse as a host, but the scheme and host checks reject it
+// regardless.
+func validateMediaURL(source, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("bad media url")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("media url must be http(s)")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return fmt.Errorf("media url has no host")
+	}
+	allowed, ok := mediaHosts[strings.ToLower(source)]
+	if !ok {
+		return fmt.Errorf("unknown save source %q", source)
+	}
+	for _, h := range allowed {
+		if host == h || strings.HasSuffix(host, "."+h) {
+			return nil
+		}
+	}
+	return fmt.Errorf("media host %q not allowed for source %q", host, source)
 }
 
 // extFromURL guesses the file extension from the media URL (path ext or

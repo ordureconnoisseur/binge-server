@@ -75,7 +75,7 @@ func (c *Client) ListVideos(ctx context.Context, modelURL string, limit int) ([]
 		"--impersonate", impersonate,
 		"--flat-playlist", "-J",
 		"--playlist-items", "1-"+itoa(limit),
-		modelURL,
+		"--", modelURL,
 	)
 	if err != nil {
 		return nil, err
@@ -109,7 +109,7 @@ type VideoMeta struct {
 	ViewKey    string
 	Title      string
 	ThumbURL   string
-	Duration   int   // seconds
+	Duration   int // seconds
 	ViewCount  int64
 	UploadDate string // YYYYMMDD
 	CreatedUtc int64
@@ -123,7 +123,7 @@ func (c *Client) FetchVideoMeta(ctx context.Context, videoURL string) (*VideoMet
 	out, err := c.run(ctx,
 		"--impersonate", impersonate,
 		"--no-download", "-j",
-		videoURL,
+		"--", videoURL,
 	)
 	if err != nil {
 		return nil, err
@@ -163,7 +163,7 @@ func (c *Client) ExtractStreamURL(ctx context.Context, videoURL string) (string,
 	out, err := c.run(ctx,
 		"--impersonate", impersonate,
 		"-f", progressiveFormat,
-		"-g", videoURL,
+		"-g", "--", videoURL,
 	)
 	if err != nil {
 		return "", err
@@ -187,7 +187,7 @@ func (c *Client) Download(ctx context.Context, videoURL, destPath string) error 
 		"-f", progressiveFormat,
 		"-o", destPath,
 		"--no-part",
-		videoURL,
+		"--", videoURL,
 	)
 	return err
 }
