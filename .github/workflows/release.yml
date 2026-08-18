@@ -144,6 +144,27 @@ jobs:
             binge-server_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
             binge-server_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
 
+  checksums:
+    name: publish SHA256SUMS
+    runs-on: ubuntu-latest
+    # After every binary is attached, so the file covers the whole set.
+    needs: binaries
+    permissions:
+      contents: write
+    steps:
+      - name: Hash the published assets and attach the list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p sums && cd sums
+          # Hash what is actually on the release rather than a local
+          # rebuild, so the file describes the bytes users download.
+          gh release download "${GITHUB_REF_NAME}"             --repo "${GITHUB_REPOSITORY}"             --pattern 'binge-server_*' --dir .
+          sha256sum binge-server_* > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS             --repo "${GITHUB_REPOSITORY}" --clobber
+
   docker:
     name: docker image (multi-arch)
     runs-on: ubuntu-latest

@@ -76,6 +76,21 @@ Each tagged release on [GitHub Releases](https://github.com/ordureconnoisseur/bi
 - `binge-server_vX.Y.Z_linux_arm64.tar.gz`
 - `binge-server_vX.Y.Z_windows_amd64.zip`
 
+Every release also carries a `SHA256SUMS` file, and the one-click
+installer checks the download against it before running anything. To
+verify a manual download:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Worth being precise about what that covers: it proves the file you got
+is the file the release publishes, so it catches a corrupted or altered
+download. It is not a signature, so it does not prove the release itself
+came from me. Anyone who could replace a binary in the release could
+replace the checksum beside it. If that distinction matters for your
+threat model, build from source.
+
 Unpack and run:
 
 ```bash
