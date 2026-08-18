@@ -66,6 +66,18 @@ func stashURLAllowed(raw string) bool {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
+	// Only a bare origin. Callers build a target by appending a path to
+	// this value, so a query or fragment would swallow that path and a
+	// non-root path would move it: "http://127.0.0.1:7878/config?x="
+	// plus "/graphql" is a request to /config on the daemon itself,
+	// which answers 200 to a body it does not understand and so passes
+	// for a working Stash.
+	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return false
+	}
+	if u.Path != "" && u.Path != "/" {
+		return false
+	}
 	return isPrivateHost(u.Hostname())
 }
 

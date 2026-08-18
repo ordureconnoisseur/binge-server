@@ -365,8 +365,8 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	// probed against a private Stash below. Without this a caller could
 	// use the exemption to store a Reddit cookie and nothing else, and
 	// so occupy a daemon it never proved it owns.
-	if s.store.Get(configstore.KeyStashAPIKey) == "" && !requestFromPrivateIP(r) &&
-		(req.StashAPIKey == nil || *req.StashAPIKey == "") {
+	firstRunPublicClaim := s.store.Get(configstore.KeyStashAPIKey) == "" && !requestFromPrivateIP(r)
+	if firstRunPublicClaim && (req.StashAPIKey == nil || *req.StashAPIKey == "") {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "the first request to an unconfigured binge-server reached from a public address must set the Stash API key",
 		})
@@ -390,8 +390,36 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.StashAPIKey != nil && *req.StashAPIKey != "" {
+		// A public caller claiming an unconfigured daemon is trusted
+		// only because the key it presents is proven to work. But a
+		// Stash with authentication switched off answers 200 to any
+		// key, and so does any other private endpoint that happens to
+		// return JSON, so a bare success proves nothing about the
+		// caller. Probe again with a key that cannot be valid: if that
+		// also passes, the target is not checking, and the claim is
+		// refused rather than handing the daemon to whoever asked.
+		//
+		// Scoped to the public first-run claim on purpose. An owner on
+		// their own LAN running an authless Stash is doing something
+		// normal and must still be able to configure the daemon.
+		if firstRunPublicClaim {
+			if err := probeStashAPIKey(r.Context(), stashURL, bogusProbeKey); err == nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "that Stash accepts any API key, so it cannot prove who you are. Configure this daemon from its own network, or seed STASH_API_KEY.",
+				})
+				return
+			}
+		}
 		if err := probeStashAPIKey(r.Context(), stashURL, *req.StashAPIKey); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stash api key rejected: " + err.Error()})
+			// The raw error names the dial result, which tells an
+			// off-network caller whether a host and port are open. Fine
+			// for someone already on the network and holding a key;
+			// an unauthenticated port scanner otherwise.
+			detail := err.Error()
+			if firstRunPublicClaim {
+				detail = "could not reach that Stash"
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stash api key rejected: " + detail})
 			return
 		}
 	}
@@ -485,7 +513,18 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("ApiKey", apiKey)
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+		// Do not follow redirects, exactly as probeRedditCookie does.
+		// Go drops Authorization and Cookie when a redirect crosses to
+		// another host, but ApiKey is a custom header and is copied to
+		// whatever the target is, public hosts included. A private host
+		// that 302s was therefore enough to walk the real Stash key out
+		// to an address of the redirecting host's choosing.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -506,6 +545,10 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 	}
 	return nil
 }
+
+// bogusProbeKey is offered to a Stash to see whether it rejects anything
+// at all. It is deliberately not a plausible key, and is never stored.
+const bogusProbeKey = "binge-server-negative-control-not-a-real-key"
 
 // probeRedditCookie does a tiny request to oauth.reddit.com's /api/v1/me
 // — fast, low-cost, and returns 200 only for a valid session.
