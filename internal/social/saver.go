@@ -292,7 +292,15 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// Cap the copy. Without it a single small /save call can write an
+	// unbounded response into the library and fill the volume. The limit
+	// is generous for the images and short clips this path handles;
+	// full-length pornhub video goes through yt-dlp, not here.
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxSaveBytes+1))
+	if err == nil && n > maxSaveBytes {
+		err = fmt.Errorf("media exceeds %d byte limit", maxSaveBytes)
+	}
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -300,6 +308,10 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	f.Close()
 	return os.Rename(tmp, dest)
 }
+
+// maxSaveBytes caps a single non-video Save download. Images and short
+// clips sit far under this; it exists only to stop an unbounded write.
+const maxSaveBytes = 512 << 20 // 512 MiB
 
 // mediaHosts lists the hostnames each source is allowed to fetch from.
 // A save request naming a source may only pull media from that source's

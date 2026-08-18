@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -122,7 +123,32 @@ func (s *Server) Router() http.Handler {
 // The query parameter `url` must be a full https URL whose host ends
 // in `.redgifs.com` — anything else is rejected so this can't double
 // as an open-relay.
-var redgifsHTTP = &http.Client{Timeout: 30 * time.Second}
+// allowedHostSuffixes builds a CheckRedirect that keeps a proxy client
+// on its allowlist across redirects. The initial host is checked in the
+// handler; this covers every hop after it, so a 302 from an allowlisted
+// CDN cannot walk the daemon to an internal address.
+func allowedHostSuffixes(suffixes ...string) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		host := strings.ToLower(req.URL.Host)
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		for _, suf := range suffixes {
+			if host == suf || strings.HasSuffix(host, "."+suf) {
+				return nil
+			}
+		}
+		return fmt.Errorf("redirect to disallowed host %q", host)
+	}
+}
+
+var redgifsHTTP = &http.Client{
+	Timeout:       30 * time.Second,
+	CheckRedirect: allowedHostSuffixes("redgifs.com"),
+}
 
 func (s *Server) proxyRedgifs(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("url")
@@ -188,7 +214,10 @@ func (s *Server) proxyRedgifs(w http.ResponseWriter, r *http.Request) {
 //
 // Allowlist: any host ending in `.redd.it` or `.redditmedia.com`. Same
 // "no open-relay" guarantee as the redgifs proxy.
-var redditProxyHTTP = &http.Client{Timeout: 30 * time.Second}
+var redditProxyHTTP = &http.Client{
+	Timeout:       30 * time.Second,
+	CheckRedirect: allowedHostSuffixes("redd.it", "redditmedia.com", "reddit.com"),
+}
 
 func (s *Server) proxyReddit(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("url")

@@ -47,6 +47,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && python -c "import yt_dlp.networking._curlcffi"
 COPY --from=build /out/binge-server /usr/local/bin/binge-server
 
+# Run unprivileged. The daemon shells out to yt-dlp / gallery-dl / ffmpeg
+# on caller-influenced input, so a compromise of one of those must not be
+# root in the container. /data is created and owned here because a mounted
+# volume otherwise lands as root and the daemon could not write its DB.
+RUN useradd --system --create-home --uid 10001 binge     && mkdir -p /data && chown binge:binge /data
+USER binge
+
 # Persistent data (SQLite + the generated gallery-dl cookie config).
 # Mount a volume here.
 VOLUME ["/data"]

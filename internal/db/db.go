@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"os"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -30,6 +31,13 @@ func Open(path string) (*sql.DB, error) {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping: %w", err)
+	}
+	// The config table holds the Stash API key and the Reddit/X session
+	// cookies in plaintext, so keep the file owner-only. Best-effort:
+	// a shared-host reader is the threat, and on Windows this is a no-op
+	// that must not fail the open. Skip ":memory:" and DSN-only paths.
+	if path != "" && path != ":memory:" {
+		_ = os.Chmod(path, 0o600)
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()

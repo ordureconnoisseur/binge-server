@@ -141,10 +141,10 @@ func dropOwned(vids []phVideo, owned map[string]struct{}) []phVideo {
 // ── feed ────────────────────────────────────────────────────────────
 
 type phVideo struct {
-	ID         string  `json:"id"`         // viewkey
+	ID         string  `json:"id"` // viewkey
 	Title      *string `json:"title"`
-	SourceURL  string  `json:"sourceUrl"`  // pornhub watch page
-	ThumbURL   *string `json:"thumbUrl"`   // raw phncdn (web proxies it)
+	SourceURL  string  `json:"sourceUrl"` // pornhub watch page
+	ThumbURL   *string `json:"thumbUrl"`  // raw phncdn (web proxies it)
 	Duration   int     `json:"duration"`
 	ViewCount  int64   `json:"viewCount"`
 	UploadDate *string `json:"uploadDate"`
@@ -268,7 +268,10 @@ func (s *Server) pornhubStories(w http.ResponseWriter, r *http.Request) {
 // Extract the progressive mp4 (cached briefly) then relay its bytes with
 // Range support, so the client plays inline without the IP/time-locked
 // CDN URL ever leaving this egress.
-var phStreamHTTP = &http.Client{Timeout: 60 * time.Second}
+var phStreamHTTP = &http.Client{
+	Timeout:       60 * time.Second,
+	CheckRedirect: allowedHostSuffixes("phncdn.com", "pornhub.com"),
+}
 
 func (s *Server) pornhubStream(w http.ResponseWriter, r *http.Request) {
 	if s.pornhub == nil {
@@ -324,7 +327,10 @@ func (s *Server) pornhubStream(w http.ResponseWriter, r *http.Request) {
 // ── thumbnail proxy ─────────────────────────────────────────────────
 // PornHub thumbnails are on phncdn.com (an adult CDN some networks
 // block); relay them through this egress. Allowlist phncdn only.
-var phThumbHTTP = &http.Client{Timeout: 20 * time.Second}
+var phThumbHTTP = &http.Client{
+	Timeout:       20 * time.Second,
+	CheckRedirect: allowedHostSuffixes("phncdn.com", "pornhub.com"),
+}
 
 func (s *Server) pornhubThumb(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("url")
