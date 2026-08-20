@@ -73,6 +73,20 @@ type Server struct {
 	// Woken alongside the Reddit poller when credentials change.
 	pillars []PillarPoller
 
+	// One wake at a time. A full scan takes minutes and the plugin
+	// pushes the Stash key whenever it finds the daemon unconfigured,
+	// so without this a couple of page loads could set several
+	// concurrent scans of the whole library running against Stash.
+	wakeMu      sync.Mutex
+	wakeRunning bool
+	wakeAgain   bool
+
+	// Rate limit on the key-rotation escape, which costs two requests
+	// to Stash and is reachable by anyone on the local network who can
+	// present a wrong key.
+	rotateMu      sync.Mutex
+	lastRotateTry time.Time
+
 	// The User-Agent the poller sends. The cookie probe has to send the
 	// same one: Reddit's answer depends on who is asking, so validating
 	// with a different identity can accept a cookie that then fails on
@@ -136,18 +150,46 @@ func (s *Server) wakePillars() {
 	if s.poller == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 
-	s.poller.ApplyConfig()
-	if err := s.poller.SyncPerformers(ctx); err != nil {
-		s.logWarn("performer sync after config change failed", "err", err)
-	} else if err := s.poller.PollAll(ctx); err != nil {
-		s.logWarn("poll after config change failed", "err", err)
+	// Collapse concurrent calls into one run, and remember that another
+	// arrived so the run repeats rather than being dropped: a wake that
+	// began before the newest credentials were stored may already be
+	// past the point where it reads them.
+	s.wakeMu.Lock()
+	if s.wakeRunning {
+		s.wakeAgain = true
+		s.wakeMu.Unlock()
+		return
 	}
-	for _, p := range s.pillars {
-		if err := p.SyncPerformers(ctx); err != nil {
-			s.logWarn("pillar sync after config change failed", "err", err)
+	s.wakeRunning = true
+	s.wakeMu.Unlock()
+	defer func() {
+		s.wakeMu.Lock()
+		s.wakeRunning = false
+		s.wakeMu.Unlock()
+	}()
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		s.poller.ApplyConfig()
+		if err := s.poller.SyncPerformers(ctx); err != nil {
+			s.logWarn("performer sync after config change failed", "err", err)
+		} else if err := s.poller.PollAll(ctx); err != nil {
+			s.logWarn("poll after config change failed", "err", err)
+		}
+		for _, p := range s.pillars {
+			if err := p.SyncPerformers(ctx); err != nil {
+				s.logWarn("pillar sync after config change failed", "err", err)
+			}
+		}
+		cancel()
+
+		s.wakeMu.Lock()
+		again := s.wakeAgain
+		s.wakeAgain = false
+		s.wakeMu.Unlock()
+		if !again {
+			return
 		}
 	}
 }

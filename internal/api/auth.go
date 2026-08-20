@@ -136,6 +136,16 @@ func (s *Server) allowKeyRotation(r *http.Request) bool {
 	if presented == "" {
 		return false
 	}
+	// Two requests to Stash per attempt, triggerable by anyone on the
+	// local network who can present a wrong key. Cheap to allow now and
+	// then, not worth allowing in a loop.
+	s.rotateMu.Lock()
+	if time.Since(s.lastRotateTry) < 2*time.Second {
+		s.rotateMu.Unlock()
+		return false
+	}
+	s.lastRotateTry = time.Now()
+	s.rotateMu.Unlock()
 	stashURL := s.store.Get(configstore.KeyStashURL)
 	if stashURL == "" {
 		return false
