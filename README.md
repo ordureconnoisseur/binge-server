@@ -125,6 +125,15 @@ Credentials, all set from binge → Settings → "binge-server configuration":
 2. **Reddit session cookie** — has to be pasted manually because cookies live in a different browser origin than Stash. Fastest route is the **Import cookies.txt** button at the top of the card: export cookies from a browser signed into Reddit and X, pick the file, and it fills both pillars in one step. It is parsed in your browser and only the Reddit and X values are sent. Otherwise expand "How to find your Reddit cookie" for the manual four-step version.
 
    Cookies expire every few months. When that happens the daemon notices on its next poll and the settings card says so, with the date stories stopped updating — paste a fresh cookie to clear it.
+
+### If Reddit answers 403
+
+Reddit refuses anonymous requests to its `.json` endpoints outright, so a 403 means the daemon's requests are not being recognised as signed in. Two causes, and the settings card distinguishes them for you:
+
+- **The cookie is not reaching Reddit.** Up to v0.3.2 a value pasted by hand was sent exactly as typed, and a `Cookie` header has to be `name=value`, so a bare value arrived as nothing at all and every request came back 403. The cookies.txt import was unaffected, which is why one route worked and the other did not. Fixed in v0.4.0: the value is named for you, and an already-saved one is repaired on the next poll, so upgrading is enough.
+- **Reddit is refusing the address.** Hosted servers and some VPN exits are blocked wholesale, whatever cookie you send. The settings card says so in its own words, because a new cookie cannot fix it. Run the daemon from your home connection or try a different exit.
+
+Older versions also retired each performer as they failed, and nothing ever un-retired them, so stories stayed empty even after the cookie was fixed. From v0.4.0 a handle is only retired when Reddit is answering other handles at the same moment, and saving a cookie gives every retired handle another chance.
 3. **X cookies** (`auth_token` + `ct0`) — only for the X pillar, and only together: `auth_token` is useless without `ct0`. Same rotation caveat as Reddit.
 
 PornHub needs no credentials. Save additionally needs a write path — see `BINGE_SOCIAL_WRITE_ROOT` below.
@@ -174,7 +183,7 @@ The full re-scan happens every 24 hours by default. Add a Reddit URL to a perfor
 
 | Method | Path | Description |
 |-|-|-|
-| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, redditCookieExpiredAt, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
+| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, redditCookieExpiredAt, redditBlockedAt, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
 | GET | `/config` | Public shape of stored config — booleans for which secrets are set, never the values |
 | POST | `/config` | Body: `{stashUrl?, stashApiKey?, redditSessionCookie?}`. Validates each non-empty field against the live service before persisting |
 | GET | `/reddit/stories?sinceUtc=N` | Per-performer digest, used by binge's stories row |

@@ -317,6 +317,8 @@ func (p *Poller) PollAll(ctx context.Context) error {
 	// so /config can say so, rather than leaving it in a log nobody reads.
 	expired := false
 	succeeded := 0
+	forbidden := 0
+	var pending []statusMark
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -333,6 +335,12 @@ func (p *Poller) PollAll(ctx context.Context) error {
 				expired = true
 				break
 			}
+			if st := statusFor(err); st != "" {
+				pending = append(pending, statusMark{stashID: t.StashID, status: st})
+			}
+			if errors.Is(err, reddit.ErrForbidden) {
+				forbidden++
+			}
 			p.log.Warn("poll performer failed", "stash_id", t.StashID, "handle", t.Handle, "err", err)
 			continue
 		}
@@ -342,7 +350,25 @@ func (p *Poller) PollAll(ctx context.Context) error {
 	// Only a fetch that actually worked clears the flag. Bailing out on a
 	// rate limit before reaching anyone tells us nothing about the cookie,
 	// and clearing on that would flap the warning off and on.
+	// A handle is only suspended, missing or forbidden if Reddit was
+	// answering everyone else at the same moment. When nothing succeeded,
+	// the refusal is about the caller, not the performer: a dead cookie,
+	// or an address Reddit will not serve. Writing it onto each handle in
+	// turn would retire the whole library one tick at a time, and nothing
+	// in the daemon ever sets a handle back to ok, so that damage
+	// outlives its cause. Fixing the cookie afterwards would not bring a
+	// single story back.
+	if succeeded > 0 {
+		for _, m := range pending {
+			p.markStatus(ctx, m.stashID, m.status)
+		}
+	} else if forbidden > 0 {
+		p.log.Error("reddit refused every request this cycle, so no handles were retired",
+			"performers", len(targets))
+	}
+
 	p.setCookieExpired(ctx, expired, succeeded > 0)
+	p.setRedditBlocked(ctx, succeeded == 0 && forbidden > 0, succeeded > 0)
 
 	_, _ = p.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('last_poll', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, time.Now().UTC().Format(time.RFC3339))
@@ -366,6 +392,45 @@ func (p *Poller) setCookieExpired(ctx context.Context, expired, sawSuccess bool)
 	}
 }
 
+// setRedditBlocked records or clears the "reddit is refusing this
+// daemon outright" marker. Separate from the expired-cookie marker
+// because the remedy is different: an expired session asks for a new
+// cookie, whereas a blanket refusal is usually about where the daemon
+// is calling from, and pasting a fresh cookie will not touch it.
+func (p *Poller) setRedditBlocked(ctx context.Context, blocked, sawSuccess bool) {
+	if blocked {
+		// First sighting wins, so the UI can say when it started.
+		_, _ = p.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_state(key,value)
+			VALUES('reddit_blocked_at', ?)`, time.Now().UTC().Format(time.RFC3339))
+		return
+	}
+	if sawSuccess {
+		_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='reddit_blocked_at'`)
+	}
+}
+
+// statusMark is a verdict on one handle, held back until the end of the
+// cycle so it can be weighed against whether anything worked at all.
+type statusMark struct {
+	stashID int
+	status  string
+}
+
+// statusFor maps a failure to the status it justifies recording against
+// the handle, or "" when the failure says nothing about that handle in
+// particular.
+func statusFor(err error) string {
+	switch {
+	case errors.Is(err, reddit.ErrNotFound):
+		return "notfound"
+	case errors.Is(err, reddit.ErrSuspended):
+		return "suspended"
+	case errors.Is(err, reddit.ErrForbidden):
+		return "unavailable"
+	}
+	return ""
+}
+
 func (p *Poller) pollOne(ctx context.Context, t pollTarget) (int, error) {
 	var (
 		posts []reddit.Post
@@ -380,15 +445,8 @@ func (p *Poller) pollOne(ctx context.Context, t pollTarget) (int, error) {
 		return 0, fmt.Errorf("unknown handle_kind %q", t.HandleKind)
 	}
 	if err != nil {
-		// Mark suspended/notfound/forbidden so we stop polling.
-		switch {
-		case errors.Is(err, reddit.ErrNotFound):
-			p.markStatus(ctx, t.StashID, "notfound")
-		case errors.Is(err, reddit.ErrSuspended):
-			p.markStatus(ctx, t.StashID, "suspended")
-		case errors.Is(err, reddit.ErrForbidden):
-			p.markStatus(ctx, t.StashID, "unavailable")
-		}
+		// Whether this retires the handle is the caller's call: it is the
+		// only place that knows whether anyone else was answered.
 		return 0, err
 	}
 

@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/ordureconnoisseur/binge-server/internal/configstore"
 	"github.com/ordureconnoisseur/binge-server/internal/pornhub"
+	"github.com/ordureconnoisseur/binge-server/internal/reddit"
 	"github.com/ordureconnoisseur/binge-server/internal/social"
 	"github.com/ordureconnoisseur/binge-server/internal/stash"
 	"github.com/ordureconnoisseur/binge-server/internal/twitter"
@@ -300,6 +301,7 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		"lastPerformerSync":     state["last_performer_sync"],
 		"lastPoll":              state["last_poll"],
 		"redditCookieExpiredAt": state["reddit_cookie_expired_at"],
+		"redditBlockedAt":       state["reddit_blocked_at"],
 		"performerCount":        performerCount,
 		"postCount":             postCount,
 	})
@@ -326,6 +328,11 @@ type configGetResponse struct {
 	// no visible symptom other than stories quietly stopping, so the UI
 	// needs to be told rather than the user having to guess.
 	RedditCookieExpiredAt string `json:"redditCookieExpiredAt,omitempty"`
+	// RFC3339 time the poller first found Reddit refusing every request
+	// it made, empty otherwise. Distinct from an expired cookie: this one
+	// is usually about the address the daemon calls from, so a fresh
+	// cookie will not fix it and the UI should not suggest one.
+	RedditBlockedAt string `json:"redditBlockedAt,omitempty"`
 	// Social "save to Stash" library roots (not secret). Configured =
 	// both set.
 	SocialWriteRoot      string `json:"socialWriteRoot"`
@@ -361,6 +368,12 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 				return ""
 			}
 			return s.syncState(r.Context(), "reddit_cookie_expired_at")
+		}(),
+		RedditBlockedAt: func() string {
+			if s.store.Get(configstore.KeyRedditCookie) == "" {
+				return ""
+			}
+			return s.syncState(r.Context(), "reddit_blocked_at")
 		}(),
 	})
 }
@@ -474,7 +487,7 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.RedditSessionCookie != nil {
-		if err := s.store.Set(configstore.KeyRedditCookie, *req.RedditSessionCookie); err != nil {
+		if err := s.store.Set(configstore.KeyRedditCookie, reddit.NormalizeCookie(*req.RedditSessionCookie)); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return
 		}
@@ -483,6 +496,17 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		// stare at a stale warning until the next poll tick, up to 4h away.
 		_, _ = s.db.ExecContext(r.Context(),
 			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
+		_, _ = s.db.ExecContext(r.Context(),
+			`DELETE FROM sync_state WHERE key='reddit_blocked_at'`)
+		// Give every retired handle another chance. A run of refusals
+		// from Reddit retires performers one at a time and nothing else
+		// in the daemon ever un-retires them, so without this a user who
+		// fixes a broken cookie gets a working daemon and an empty
+		// stories row, with no way back short of editing the database.
+		// New credentials are a new answer to "who is asking", which is
+		// the question every one of those refusals was really about.
+		_, _ = s.db.ExecContext(r.Context(),
+			`UPDATE performers SET handle_status='ok' WHERE handle_status != 'ok'`)
 	}
 	// X cookies — both must be provided together (auth_token is useless
 	// without the matching ct0 csrf token). Persisted then pushed into the
@@ -586,7 +610,10 @@ func probeRedditCookie(ctx context.Context, cookie string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Cookie", cookie)
+	// Same normalisation the poller applies, or a pasted bare value
+	// would be rejected here for being anonymous even though it is the
+	// exact thing the settings page asks for.
+	req.Header.Set("Cookie", reddit.NormalizeCookie(cookie))
 	req.Header.Set("User-Agent", "binge-server/0.2 (config validator)")
 	client := &http.Client{
 		Timeout: 8 * time.Second,

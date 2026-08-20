@@ -36,7 +36,7 @@ type Client struct {
 
 func New(cookie, userAgent string) *Client {
 	return &Client{
-		cookie:    cookie,
+		cookie:    NormalizeCookie(cookie),
 		userAgent: userAgent,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
@@ -57,8 +57,31 @@ func New(cookie, userAgent string) *Client {
 // the next poll cycle without a daemon restart.
 func (c *Client) SetCookie(cookie string) {
 	c.mu.Lock()
-	c.cookie = cookie
+	c.cookie = NormalizeCookie(cookie)
 	c.mu.Unlock()
+}
+
+// NormalizeCookie turns whatever the user pasted into a usable Cookie
+// header.
+//
+// The settings page asks for the value of the reddit_session row, which
+// is the right thing to ask for and the only part that is secret. Sent
+// as-is it is not a cookie at all: a Cookie header is name=value pairs,
+// so a bare value arrives at Reddit as an unnamed nothing, the request
+// is anonymous, and every listing comes back 403. The cookies.txt
+// import never had this problem because it builds the pair itself,
+// which is why one route worked and the other did not.
+//
+// A reddit_session value is base64url and carries no "=", so its
+// presence is what separates a full header from a bare value. If some
+// future value does contain one it is passed through untouched, which
+// is no worse than the old behaviour.
+func NormalizeCookie(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.Contains(s, "=") {
+		return s
+	}
+	return "reddit_session=" + s
 }
 
 func (c *Client) currentCookie() string {
