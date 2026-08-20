@@ -203,24 +203,79 @@ func (c *Client) UpdateImageMeta(ctx context.Context, id string, m EntityMeta) e
 // (e.g. instagram.com/<h>, x.com/<h>, reddit.com/u/<h>, redgifs.com/users/<h>).
 // Empty if none — caller falls back to the performer name.
 func PerformerHandle(p Performer, source string) string {
-	hosts := map[string][]string{
-		"x":         {"x.com/", "twitter.com/"},
-		"instagram": {"instagram.com/"},
-		"reddit":    {"reddit.com/u/", "reddit.com/user/", "reddit.com/r/"},
-		"redgifs":   {"redgifs.com/users/", "redgifs.com/u/"},
+	// host suffix -> the path prefixes that introduce a handle on it.
+	//
+	// Matched against the parsed host, not by searching the whole URL
+	// for a substring. Searching found "reddit.com/user/" inside
+	// https://elsewhere.example/reddit.com/user/victim and handed back
+	// victim, and this value picks the folder a save is written into.
+	// The poller was fixed to parse the host; this copy was not, and it
+	// is the one the save path uses.
+	type rule struct {
+		hosts    []string
+		prefixes []string
 	}
-	for _, u := range p.URLs {
-		lu := strings.ToLower(u)
-		for _, h := range hosts[source] {
-			if i := strings.Index(lu, h); i >= 0 {
-				rest := u[i+len(h):]
-				rest = strings.TrimRight(rest, "/")
-				if j := strings.IndexAny(rest, "/?#"); j >= 0 {
-					rest = rest[:j]
-				}
-				if rest != "" {
-					return rest
-				}
+	rules := map[string]rule{
+		"x": {
+			hosts:    []string{"x.com", "twitter.com"},
+			prefixes: []string{"/"},
+		},
+		"instagram": {
+			hosts:    []string{"instagram.com"},
+			prefixes: []string{"/"},
+		},
+		"reddit": {
+			hosts:    []string{"reddit.com"},
+			prefixes: []string{"/u/", "/user/", "/r/"},
+		},
+		"redgifs": {
+			hosts:    []string{"redgifs.com"},
+			prefixes: []string{"/users/", "/u/"},
+		},
+	}
+	r, ok := rules[source]
+	if !ok {
+		return ""
+	}
+	for _, raw := range p.URLs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u == nil {
+			continue
+		}
+		// A performer's urls[] is typed by hand, so a bare
+		// "reddit.com/u/x" with no scheme is ordinary; url.Parse reads
+		// that as a path with no host.
+		if u.Host == "" && !strings.HasPrefix(raw, "/") {
+			if u2, err2 := url.Parse("https://" + raw); err2 == nil {
+				u = u2
+			}
+		}
+		host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		matched := false
+		for _, h := range r.hosts {
+			if host == h || strings.HasSuffix(host, "."+h) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		path := u.EscapedPath()
+		for _, prefix := range r.prefixes {
+			if !strings.HasPrefix(strings.ToLower(path), prefix) {
+				continue
+			}
+			rest := strings.TrimRight(path[len(prefix):], "/")
+			if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+				rest = rest[:j]
+			}
+			if rest != "" {
+				return rest
 			}
 		}
 	}

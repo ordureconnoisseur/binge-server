@@ -29,6 +29,32 @@ services:
       # container on this network: use its service name.
       - STASH_URL=http://host.docker.internal:9999
 
+      # Optional. Uncomment what you need, here, under this same key.
+      #
+      # Where POST /save writes, as this container sees it.
+      # - BINGE_SOCIAL_WRITE_ROOT=/media/social
+      # The same location as STASH sees it. These differ whenever Stash
+      # is on the host (or another container) with a different mount;
+      # getting this wrong is why saved files import with broken paths.
+      # - BINGE_SOCIAL_STASH_ROOT=/path/to/your/library/social
+      #
+      # Only needed when Stash is served from a PUBLIC domain behind a
+      # reverse proxy. Loopback, LAN and tailnet origins are allowed
+      # automatically.
+      # - BINGE_ALLOWED_ORIGIN=https://stash.example.com
+      #
+      # Poll cadences. Go duration syntax (30m, 4h, 12h). PornHub is
+      # heavier per performer, hence the longer default.
+      # - BINGE_POLL_INTERVAL=4h
+      # - BINGE_PORNHUB_POLL_INTERVAL=12h
+      # - BINGE_PERFORMER_SYNC_INTERVAL=24h
+
+    # host.docker.internal is provided for you on Docker Desktop. On
+    # plain Linux it does not resolve unless you add this, so uncomment
+    # it there (or set STASH_URL to your machine's LAN address instead).
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
     volumes:
       # SQLite DB + the generated gallery-dl cookie config.
       - ./data:/data
@@ -37,28 +63,6 @@ services:
       # written into, then set the two roots below. Leave both commented
       # out and Save simply stays off.
       # - /path/to/your/library/social:/media/social
-
-    # Everything below goes under the `environment:` key above. Add the
-    # lines you need there; do not start a second `environment:` block,
-    # which is a duplicate-key error.
-    #
-    #   # Where POST /save writes, as this container sees it.
-    #   - BINGE_SOCIAL_WRITE_ROOT=/media/social
-    #   # The same location as STASH sees it. These differ whenever Stash
-    #   # is on the host (or another container) with a different mount —
-    #   # getting this wrong is why saved files import with broken paths.
-    #   - BINGE_SOCIAL_STASH_ROOT=/path/to/your/library/social
-    #
-    #   # Only needed when Stash is served from a PUBLIC domain behind a
-    #   # reverse proxy. Loopback, LAN and tailnet origins are allowed
-    #   # automatically.
-    #   - BINGE_ALLOWED_ORIGIN=https://stash.example.com
-    #
-    #   # Poll cadences. Go duration syntax (30m, 4h, 12h). PornHub is
-    #   # heavier per performer, hence the longer default.
-    #   - BINGE_POLL_INTERVAL=4h
-    #   - BINGE_PORNHUB_POLL_INTERVAL=12h
-    #   - BINGE_PERFORMER_SYNC_INTERVAL=24h
 
     # Credentials are NOT set here. Stash's API key is auto-detected and
     # the Reddit / X cookies are pasted in binge → Settings →

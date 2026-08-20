@@ -216,11 +216,14 @@ func (s *Server) wakePillars() {
 		// nearer to being refused. Exactly what the poller's comment
 		// warns against.
 		redditReady := s.poller.ApplyConfig()
+		wakeWorked := true
 		if err := s.poller.SyncPerformers(ctx); err != nil {
 			s.logWarn("performer sync after config change failed", "err", err)
+			wakeWorked = false
 		} else if redditReady {
 			if err := s.poller.PollAll(ctx); err != nil {
 				s.logWarn("poll after config change failed", "err", err)
+				wakeWorked = false
 			}
 		}
 		for _, p := range s.pillars {
@@ -228,10 +231,14 @@ func (s *Server) wakePillars() {
 				s.logWarn("pillar sync after config change failed", "err", err)
 			}
 		}
-		// A wake that got through says as much as a poll cycle does,
-		// and without this the last failure stayed on /healthz after
-		// the credentials that caused it had been replaced.
-		s.clearPollError()
+		// Only a wake that actually worked says anything. Clearing
+		// unconditionally erased the reason for the failure that had
+		// just happened, which made a daemon whose performer sync keeps
+		// failing look healthy again on /healthz: precisely the thing
+		// recording it was for.
+		if wakeWorked {
+			s.clearPollError()
+		}
 		cancel()
 
 		s.wakeMu.Lock()
@@ -602,6 +609,9 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	// caller. Config is a handful of short strings; a quarter of a
 	// megabyte is already generous.
 	r.Body = http.MaxBytesReader(w, r.Body, maxConfigBody)
+	// Held until the end: a failure here must not skip the fields that
+	// arrived in the same request.
+	var reviveErr error
 	var req configPostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
@@ -774,12 +784,14 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		// it. Losing it silently meant the user was told their cookie
 		// was saved while the in-flight cycle re-retired the whole
 		// library, which is the damage this code exists to undo.
+		// Recorded, not returned. Returning here skipped the X cookies
+		// and the library roots that arrived in the same request, so a
+		// settings page that posts every field on Save silently lost
+		// them, and the message named only the cookie. The rest of the
+		// request is finished and the failure is surfaced at the end.
 		if err := s.reviveHandles(r.Context()); err != nil {
-			s.log.Error("cookie saved but handles could not be revived", "err", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "the cookie was saved, but re-enabling your performers failed. Save it again once the daemon is idle",
-			})
-			return
+			s.logWarn("cookie saved but handles could not be revived", "err", err)
+			reviveErr = err
 		}
 	}
 	// X cookies — both must be provided together (auth_token is useless
@@ -821,6 +833,14 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
+	if reviveErr != nil {
+		// Everything else in the request has been applied by now, so
+		// this reports the one part that did not.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "everything was saved, but re-enabling your retired performers failed. Save your cookie again once the daemon is idle",
+		})
+		return
+	}
 	// Credentials just changed, so make them count now rather than at
 	// some point in the next day.
 	if req.StashURL != nil || req.StashAPIKey != nil || req.RedditSessionCookie != nil {

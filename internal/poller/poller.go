@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -335,25 +336,46 @@ func (p *Poller) upsertPerformersBatch(ctx context.Context, performers []stash.P
 // semantics produces exactly that, and reconciling against it deleted
 // every performer, which cascaded to every post: up to ninety days of
 // Reddit history that cannot be re-fetched, because Reddit serves only
-// the last 25 submissions per handle. Nothing warned, and the next
-// healthy cycle quietly re-created the performers with no posts.
+// the last 25 submissions per handle.
 //
-// So a wipe is treated as a failed sync rather than an instruction. A
-// sync that keeps nothing while the table holds rows is refused, and so
-// is one that would remove most of the library: real edits remove a few
-// performers at a time, and a genuine mass deletion can wait for the
-// operator to say so.
-func safeToPrune(keep, existing, removing int) (bool, string) {
+// Only the empty answer is refused outright, and it is refused forever,
+// because it is never a real instruction: a Stash with no linked
+// performers gives this daemon nothing to poll, so keeping the rows
+// costs nothing and deleting them cannot help.
+//
+// A large-but-not-total removal is different. An earlier version
+// refused those on a ratio, which turned out to be a trap: every kept
+// performer is upserted before this runs, so `existing` is always
+// keep+removing and the ratio reduced to "refuse whenever removed is at
+// least kept". The inputs never change on the next cycle, so a library
+// that genuinely shrank by half could never reconcile again, a two
+// performer library could never drop to one, and because a failed sync
+// stops the poll that follows it, saving config quietly stopped working
+// too. It is now asked for once and confirmed by repetition: the same
+// removal offered twice in a row is what the user meant.
+func safeToPrune(keep, existing, removing int, sameAsLastTime bool) (bool, string) {
 	if existing == 0 {
 		return true, ""
 	}
 	if keep == 0 {
 		return false, "stash returned no linked performers at all"
 	}
-	if removing*2 >= existing {
-		return false, "half or more of the library would be removed"
+	if removing*2 >= existing && !sameAsLastTime {
+		return false, "half or more of the library would go; waiting for the next sync to say the same"
 	}
 	return true, ""
+}
+
+// pruneSignature identifies a proposed removal, so an unusually large
+// one can be recognised when it is offered a second time.
+func pruneSignature(toDelete []int) string {
+	ids := append([]int(nil), toDelete...)
+	sort.Ints(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.Itoa(id)
+	}
+	return strings.Join(parts, ",")
 }
 
 func (p *Poller) deleteMissingPerformers(ctx context.Context, keep map[int]bool) error {
@@ -380,14 +402,24 @@ func (p *Poller) deleteMissingPerformers(ctx context.Context, keep map[int]bool)
 	}
 	var existing int
 	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performers`).Scan(&existing)
-	if ok, why := safeToPrune(len(keep), existing, len(toDelete)); !ok {
-		p.log.Error("refusing to prune performers, treating this sync as failed",
+	sig := pruneSignature(toDelete)
+	var lastSig string
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key='pending_prune'`).Scan(&lastSig)
+	if ok, why := safeToPrune(len(keep), existing, len(toDelete), sig == lastSig); !ok {
+		// Remember what was asked for, so the same answer next time is
+		// taken as confirmation rather than refused again forever.
+		_, _ = p.db.ExecContext(ctx,
+			`INSERT INTO sync_state(key,value) VALUES('pending_prune', ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sig)
+		p.log.Error("refusing to prune performers for now, treating this sync as failed",
 			"reason", why,
 			"linked_in_stash", len(keep),
 			"in_db", existing,
 			"would_remove", len(toDelete))
 		return fmt.Errorf("refusing to prune performers: %s", why)
 	}
+	_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='pending_prune'`)
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -734,9 +766,20 @@ func (p *Poller) sweepOldPosts(ctx context.Context) error {
 	// The cutoff comes from the clock and the comparison is against
 	// Reddit's own timestamp, so a container with a wrong clock, or one
 	// restored from a snapshot, could put the cutoff past every row and
-	// turn this into DELETE FROM posts. Bounded below so it cannot.
-	if cutoff <= 0 {
-		p.log.Warn("retention cutoff is not sane, skipping sweep", "cutoff", cutoff)
+	// turn this into DELETE FROM posts.
+	//
+	// The bound has to be an upper one. A previous version bounded it
+	// below, which reads sensibly and protects nothing: reaching past
+	// every row needs a clock in the FUTURE, which yields a large
+	// positive cutoff, while a clock in the past yields a negative one
+	// that would have matched nothing anyway. Refuse to delete anything
+	// dated later than the newest post actually held.
+	var newest int64
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(created_utc), 0) FROM posts`).Scan(&newest)
+	if cutoff <= 0 || (newest > 0 && cutoff > newest) {
+		p.log.Warn("retention cutoff is not sane, skipping sweep",
+			"cutoff", cutoff, "newest_post", newest)
 		return nil
 	}
 	// created_utc > 0 because a post whose timestamp Reddit omitted

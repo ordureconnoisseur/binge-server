@@ -182,7 +182,7 @@ The other pillars key off the same `urls` field:
 
 A performer with none of these is simply not polled — there's no cost to leaving them unset.
 
-The full re-scan happens every 24 hours by default, and also whenever you save credentials from the binge settings page, which is what makes a freshly configured daemon start working straight away instead of at this time tomorrow. `POST /reddit/refresh` polls the performers already known; it does not re-scan Stash for new ones.
+The full re-scan happens every 24 hours by default, and also whenever you save a Stash URL, Stash API key or Reddit cookie from the binge settings page, which is what makes a freshly configured daemon start working straight away instead of at this time tomorrow. `POST /reddit/refresh` polls the performers already known; it does not re-scan Stash for new ones.
 
 ## HTTP API
 
@@ -191,7 +191,7 @@ Every route except `/healthz` requires the Stash API key once one is stored, sen
 
 | Method | Path | Description |
 |-|-|-|
-| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, redditCookieExpiredAt, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
+| GET | `/healthz` | `{ ok, version, configured, pillars, lastPerformerSync, lastPoll, lastPollError, redditCookieExpiredAt, performerCount, postCount }`. `pillars` breaks `configured` down per feed; `lastPollError` is flattened unless the caller presents the Stash API key. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
 | GET | `/config` | Public shape of stored config — booleans for which secrets are set, never the values |
 | POST | `/config` | Body: `{stashUrl?, stashApiKey?, redditSessionCookie?}`. Validates each non-empty field against the live service before persisting |
 | GET | `/reddit/stories?sinceUtc=N` | Per-performer digest, used by binge's stories row |

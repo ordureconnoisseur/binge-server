@@ -281,39 +281,33 @@ func (s *Saver) tagWhenScanned(req SaveRequest, label, token, stashType, stashPa
 }
 
 func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string) error {
-	// A file being present is not proof that a download finished.
-	//
-	// yt-dlp writes straight to the final name, and its parent context
-	// is the request's four-minute deadline, so a long video is killed
-	// mid-write and leaves a truncated file exactly where a complete
-	// one would be. This check then read that as success on the next
-	// attempt: the scan ran, the video was marked saved, and the
-	// half-file was accepted as the real thing for good. An empty file
-	// is always wrong, and a video that came in under a megabyte is
-	// wrong often enough to be worth re-fetching.
-	if fi, err := os.Stat(dest); err == nil {
-		minSize := int64(1)
-		if req.Kind == "video" {
-			minSize = 1 << 20
-		}
-		if fi.Size() >= minSize {
-			return nil // already downloaded
-		}
-		s.log("replacing an implausibly small existing file", dest)
-		if err := os.Remove(dest); err != nil {
-			return err
-		}
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	// req.MediaURL is caller-supplied and flows into a yt-dlp argv
 	// (pornhub) or an http GET (everything else). Both are dangerous with
 	// an unvalidated string: a value like "--config-location=..." is read
 	// by yt-dlp as an option rather than a URL, and an arbitrary host is
 	// an SSRF sink. Require a real http(s) URL to a host the source is
 	// expected to serve, before either path sees it.
+	//
+	// First, before anything touches the filesystem. A request that is
+	// going to be refused must not have changed anything on the way to
+	// being refused.
 	if err := validateMediaURL(req.Source, req.MediaURL); err != nil {
+		return err
+	}
+	// An existing regular file is left exactly as it is.
+	//
+	// Downloads land on a temporary name and are renamed into place only
+	// once complete, so anything sitting at dest is by construction
+	// finished: either ours from a previous save, or the user's own.
+	// Neither is ours to delete. An earlier version of this check tried
+	// to spot a truncated file by its size and remove it, which deleted
+	// small legitimate media, and deleted it before the request had even
+	// been validated. IsRegular because os.Stat succeeds on a directory
+	// too.
+	if fi, err := os.Stat(dest); err == nil && fi.Mode().IsRegular() {
+		return nil // already downloaded
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	// PornHub has no direct media URL — yt-dlp extracts + downloads the
@@ -322,7 +316,17 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 		if s.pornhub == nil {
 			return errors.New("pornhub downloader unavailable")
 		}
-		return s.pornhub.Download(ctx, req.MediaURL, dest)
+		// Into a temporary name, then renamed. yt-dlp is run with
+		// --no-part and its context is the request's deadline, so a
+		// video that takes longer than that is killed mid-write;
+		// writing straight to dest left the half-file where a complete
+		// one belongs, and the next save accepted it as finished.
+		tmp := dest + ".part"
+		defer func() { _ = os.Remove(tmp) }()
+		if err := s.pornhub.Download(ctx, req.MediaURL, tmp); err != nil {
+			return err
+		}
+		return os.Rename(tmp, dest)
 	}
 	// The source travels with the request so every redirect can be
 	// checked against the same host list the original URL was.

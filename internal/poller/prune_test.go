@@ -20,22 +20,33 @@ func TestSafeToPrune(t *testing.T) {
 	cases := []struct {
 		name                     string
 		keep, existing, removing int
+		sameAsLastTime           bool
 		want                     bool
 	}{
-		{"a fresh database has nothing to protect", 0, 0, 0, true},
-		{"stash returned nobody at all", 0, 52, 52, false},
-		{"stash returned nobody, one row held", 0, 1, 1, false},
-		{"an ordinary edit removing two of fifty", 48, 50, 2, true},
-		{"removing exactly half is still too much", 25, 50, 25, false},
-		{"removing just under half is allowed", 26, 50, 24, true},
-		{"removing nearly everything is refused", 1, 50, 49, false},
+		{"a fresh database has nothing to protect", 0, 0, 0, false, true},
+		{"stash returned nobody at all", 0, 52, 52, false, false},
+		{"stash returned nobody, one row held", 0, 1, 1, false, false},
+		// Never, however often it is asked: a Stash with nothing linked
+		// gives this daemon nothing to poll, so the rows cost nothing
+		// and deleting them cannot help.
+		{"nobody at all, asked twice", 0, 52, 52, true, false},
+		{"an ordinary edit removing two of fifty", 48, 50, 2, false, true},
+		{"removing half waits to be asked again", 25, 50, 25, false, false},
+		{"removing half, asked the same twice", 25, 50, 25, true, true},
+		{"removing just under half is allowed at once", 26, 50, 24, false, true},
+		{"removing nearly everything waits", 1, 50, 49, false, false},
+		{"removing nearly everything, confirmed", 1, 50, 49, true, true},
+		// The trap the ratio alone used to set: every kept performer is
+		// upserted before this runs, so existing is always keep+removing
+		// and a library that genuinely halved could never reconcile.
+		{"two performers dropping to one, confirmed", 1, 2, 1, true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, why := safeToPrune(c.keep, c.existing, c.removing)
+			got, why := safeToPrune(c.keep, c.existing, c.removing, c.sameAsLastTime)
 			if got != c.want {
-				t.Fatalf("safeToPrune(keep=%d, existing=%d, removing=%d) = %v (%q), want %v",
-					c.keep, c.existing, c.removing, got, why, c.want)
+				t.Fatalf("safeToPrune(keep=%d, existing=%d, removing=%d, same=%v) = %v (%q), want %v",
+					c.keep, c.existing, c.removing, c.sameAsLastTime, got, why, c.want)
 			}
 			if !got && why == "" {
 				t.Fatal("refused without saying why")

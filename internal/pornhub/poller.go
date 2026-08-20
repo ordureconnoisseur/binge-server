@@ -101,7 +101,12 @@ func (p *Poller) SyncPerformers(ctx context.Context) error {
 			if url == "" {
 				continue
 			}
-			id, _ := strconv.Atoi(perf.ID)
+			id, convErr := strconv.Atoi(perf.ID)
+			if convErr != nil || id == 0 {
+				p.log.Warn("skipping performer with a non-numeric stash id",
+					"id", perf.ID, "name", perf.Name)
+				continue
+			}
 			fav := 0
 			if perf.Favorite {
 				fav = 1
@@ -161,7 +166,12 @@ func (p *Poller) deleteMissing(ctx context.Context, keep map[int]bool) error {
 		// stored video with it.
 		var existing int
 		_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pornhub_performers`).Scan(&existing)
-		if existing > 0 && (len(keep) == 0 || len(del)*2 > existing) {
+		// Deliberately identical to the reddit poller's rule, which a
+		// previous comment claimed while using > where that one uses
+		// >=. Only the empty answer is refused outright here; a large
+		// removal is left to the reddit side's confirm-by-repetition,
+		// since these two tables are reconciled from the same Stash.
+		if existing > 0 && len(keep) == 0 {
 			p.log.Error("refusing to prune pornhub performers, treating this sync as failed",
 				"linked_in_stash", len(keep), "in_db", existing, "would_remove", len(del))
 			return fmt.Errorf("refusing to prune pornhub performers")
