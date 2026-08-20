@@ -94,8 +94,8 @@ threat model, build from source.
 Unpack and run:
 
 ```bash
-tar -xzf binge-server_v0.3.2_linux_amd64.tar.gz
-cd binge-server_v0.3.2_linux_amd64
+tar -xzf binge-server_v0.4.0_linux_amd64.tar.gz
+cd binge-server_v0.4.0_linux_amd64
 ./binge-server
 ```
 
@@ -103,7 +103,7 @@ The Docker image is also published to GHCR alongside each release:
 
 ```bash
 docker pull ghcr.io/ordureconnoisseur/binge-server:latest
-docker pull ghcr.io/ordureconnoisseur/binge-server:v0.3.2
+docker pull ghcr.io/ordureconnoisseur/binge-server:v0.4.0
 ```
 
 ### Option 3 — Build from source
