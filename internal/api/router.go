@@ -119,6 +119,30 @@ func New(db *sql.DB, store *configstore.Store, poller Poller, stashClient *stash
 	}
 }
 
+// reviveHandles un-retires every handle and stamps a new config
+// generation, atomically. See the call site for why the pair has to
+// succeed or fail together.
+func (s *Server) reviveHandles(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE performers SET handle_status='ok' WHERE handle_status != 'ok'`,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO sync_state(key,value) VALUES('config_generation', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // clearPollError forgets the last poll failure once something has
 // worked. Kept here rather than in the poller because the wake path is
 // the one place a failure can be resolved without a poll cycle running.
@@ -737,22 +761,26 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		// stare at a stale warning until the next poll tick, up to 4h away.
 		_, _ = s.db.ExecContext(r.Context(),
 			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
-		// Give every retired handle another chance. A run of refusals
-		// from Reddit retires performers one at a time and nothing else
-		// in the daemon ever un-retires them, so without this a user who
-		// fixes a broken cookie gets a working daemon and an empty
-		// stories row, with no way back short of editing the database.
-		// New credentials are a new answer to "who is asking", which is
-		// the question every one of those refusals was really about.
-		_, _ = s.db.ExecContext(r.Context(),
-			`UPDATE performers SET handle_status='ok' WHERE handle_status != 'ok'`)
-		// Tells a poll cycle already under way that its verdicts were
-		// reached under credentials nobody is using now, so it does not
-		// write them back over the handles just revived.
-		_, _ = s.db.ExecContext(r.Context(),
-			`INSERT INTO sync_state(key,value) VALUES('config_generation', ?)
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-			time.Now().UTC().Format(time.RFC3339Nano))
+		// Give every retired handle another chance, and tell any poll
+		// cycle already under way that its verdicts were reached under
+		// credentials nobody is using now, so it does not write them
+		// back over what was just revived.
+		//
+		// One transaction, and its failure is reported. These were two
+		// statements whose errors were both discarded, and the second
+		// is the guard that protects the first: under contention it is
+		// exactly the write most likely to find the database busy,
+		// since a poll cycle running is the precondition for needing
+		// it. Losing it silently meant the user was told their cookie
+		// was saved while the in-flight cycle re-retired the whole
+		// library, which is the damage this code exists to undo.
+		if err := s.reviveHandles(r.Context()); err != nil {
+			s.log.Error("cookie saved but handles could not be revived", "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "the cookie was saved, but re-enabling your performers failed. Save it again once the daemon is idle",
+			})
+			return
+		}
 	}
 	// X cookies — both must be provided together (auth_token is useless
 	// without the matching ct0 csrf token). Persisted then pushed into the

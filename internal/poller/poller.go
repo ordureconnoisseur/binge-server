@@ -282,7 +282,16 @@ func (p *Poller) upsertPerformersBatch(ctx context.Context, performers []stash.P
 		if !ok {
 			continue
 		}
-		id, _ := strconv.Atoi(perf.ID)
+		// A non-numeric id would silently become 0, and every such
+		// performer would then collide on that primary key and
+		// overwrite each other. Stash ids are numeric today; this
+		// notices if that ever stops being true.
+		id, convErr := strconv.Atoi(perf.ID)
+		if convErr != nil || id == 0 {
+			p.log.Warn("skipping performer with a non-numeric stash id",
+				"id", perf.ID, "name", perf.Name)
+			continue
+		}
 		fav := 0
 		if perf.Favorite {
 			fav = 1
@@ -296,6 +305,17 @@ func (p *Poller) upsertPerformersBatch(ctx context.Context, performers []stash.P
 				favorite=excluded.favorite,
 				reddit_handle=excluded.reddit_handle,
 				handle_kind=excluded.handle_kind,
+				-- A changed handle deserves a fresh verdict. Status was
+				-- left alone here, so a performer retired because their
+				-- URL had a typo stayed retired after the user fixed it:
+				-- only handles marked ok are polled, and nothing else
+				-- resets one. Correcting the URL in Stash is now enough.
+				handle_status=CASE
+					WHEN performers.reddit_handle != excluded.reddit_handle
+						OR performers.handle_kind != excluded.handle_kind
+					THEN 'ok'
+					ELSE performers.handle_status
+				END,
 				synced_at=datetime('now')`,
 			id, perf.Name, perf.ImagePath, fav, handle, kind, id)
 		if err != nil {

@@ -53,6 +53,9 @@ type Saver struct {
 	pornhub *pornhub.Client
 	logger  *slog.Logger
 
+	// Bounds the background taggers. Buffered, so a send is the permit.
+	taggers chan struct{}
+
 	mu        sync.RWMutex
 	writeRoot string // path THIS daemon writes to (e.g. /library/social)
 	stashRoot string // path Stash sees the same files at (e.g. Z:\Media\social)
@@ -62,6 +65,7 @@ func New(st *stash.Client, ph *pornhub.Client, logger *slog.Logger) *Saver {
 	return &Saver{
 		stash:   st,
 		pornhub: ph,
+		taggers: make(chan struct{}, 4),
 		http: &http.Client{
 			Timeout: 180 * time.Second,
 			// Every hop is re-checked, not just the first. Validating
@@ -198,7 +202,24 @@ func (s *Saver) Save(ctx context.Context, req SaveRequest) (*SaveResult, error) 
 	if req.Kind == "video" {
 		stashType = "scene"
 	}
-	go s.tagWhenScanned(req, label, base, stashType, stashPath, handle)
+	// One tagger at a time per save, and never more than a handful at
+	// once. Each polls Stash every few seconds for up to five minutes,
+	// so a burst of saves used to put an unbounded number of pollers on
+	// the same Stash: a hundred saves meant a hundred goroutines and
+	// thousands of queries, from a feature whose whole point is that it
+	// runs in the background unnoticed.
+	select {
+	case s.taggers <- struct{}{}:
+		go func() {
+			defer func() { <-s.taggers }()
+			s.tagWhenScanned(req, label, base, stashType, stashPath, handle)
+		}()
+	default:
+		// At capacity. The scan has already been asked for, so the file
+		// still lands in the library and Stash still indexes it; only
+		// the automatic tagging is skipped, and it says so.
+		s.log("too many saves tagging at once, skipping the tag pass", label)
+	}
 
 	return &SaveResult{StashType: stashType, Path: stashPath, Handle: handle, Pending: true}, nil
 }

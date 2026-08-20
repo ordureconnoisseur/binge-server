@@ -1,6 +1,11 @@
 package poller
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/ordureconnoisseur/binge-server/internal/stash"
+)
 
 // A sync that returns nothing is a failed sync, not an instruction to
 // empty the library.
@@ -36,5 +41,32 @@ func TestSafeToPrune(t *testing.T) {
 				t.Fatal("refused without saying why")
 			}
 		})
+	}
+}
+
+// Only handles marked ok are polled, and nothing else resets one, so a
+// performer retired because their Reddit URL had a typo stayed retired
+// after the user corrected it. Correcting the URL is the clearest
+// possible statement that the old verdict no longer applies.
+func TestCorrectingAHandleRevivesIt(t *testing.T) {
+	p := testPoller(t)
+	ctx := context.Background()
+	addPerformer(t, p, 1, "typo", "notfound")
+	addPerformer(t, p, 2, "fine", "unavailable")
+
+	// Performer 1's URL is fixed in Stash; performer 2's is unchanged.
+	err := p.upsertPerformersBatch(ctx, []stash.Performer{
+		{ID: "1", Name: "one", URLs: []string{"https://reddit.com/user/corrected"}},
+		{ID: "2", Name: "two", URLs: []string{"https://reddit.com/user/fine"}},
+	}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if got := statusOf(t, p, 1); got != "ok" {
+		t.Fatalf("a corrected handle stayed %q", got)
+	}
+	if got := statusOf(t, p, 2); got != "unavailable" {
+		t.Fatalf("an unchanged handle was revived anyway: %q", got)
 	}
 }
