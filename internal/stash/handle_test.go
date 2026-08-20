@@ -57,3 +57,32 @@ func TestPerformerHandle(t *testing.T) {
 		t.Fatalf("unknown source returned %q", got)
 	}
 }
+
+// This value names the folder a save is written into, so a site's own
+// routing must not end up as a directory called after it.
+func TestReservedSegmentsAreNotHandles(t *testing.T) {
+	h := func(source string, url string) string {
+		return PerformerHandle(Performer{URLs: []string{url}}, source)
+	}
+	for _, c := range []struct{ source, url string }{
+		{"x", "https://x.com/i/status/1234567890"},
+		{"x", "https://x.com/home"},
+		{"x", "https://x.com/search?q=alice"},
+		{"x", "https://twitter.com/intent/user?screen_name=alice"},
+		{"instagram", "https://instagram.com/p/ABC123/"},
+		{"instagram", "https://instagram.com/explore/tags/x/"},
+		{"reddit", "https://reddit.com/u/../escape"},
+	} {
+		if got := h(c.source, c.url); got != "" {
+			t.Fatalf("%s %q named a folder %q", c.source, c.url, got)
+		}
+	}
+	// A real handle in the same shape still resolves.
+	if got := h("x", "https://x.com/alice"); got != "alice" {
+		t.Fatalf("real handle = %q", got)
+	}
+	// Non-ASCII is kept as itself rather than percent-escaped.
+	if got := h("instagram", "https://instagram.com/josé"); got != "josé" {
+		t.Fatalf("non-ascii handle = %q", got)
+	}
+}

@@ -143,6 +143,17 @@ func (s *Server) reviveHandles(ctx context.Context) error {
 	return tx.Commit()
 }
 
+// recordPollError puts the reason a wake failed where /healthz can
+// report it, in the same row the poller uses.
+func (s *Server) recordPollError(err error) {
+	if err == nil {
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO sync_state(key,value) VALUES('last_poll_error', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, err.Error())
+}
+
 // clearPollError forgets the last poll failure once something has
 // worked. Kept here rather than in the poller because the wake path is
 // the one place a failure can be resolved without a poll cycle running.
@@ -217,13 +228,14 @@ func (s *Server) wakePillars() {
 		// warns against.
 		redditReady := s.poller.ApplyConfig()
 		wakeWorked := true
+		var wakeErr error
 		if err := s.poller.SyncPerformers(ctx); err != nil {
 			s.logWarn("performer sync after config change failed", "err", err)
-			wakeWorked = false
+			wakeWorked, wakeErr = false, err
 		} else if redditReady {
 			if err := s.poller.PollAll(ctx); err != nil {
 				s.logWarn("poll after config change failed", "err", err)
-				wakeWorked = false
+				wakeWorked, wakeErr = false, err
 			}
 		}
 		for _, p := range s.pillars {
@@ -238,6 +250,14 @@ func (s *Server) wakePillars() {
 		// recording it was for.
 		if wakeWorked {
 			s.clearPollError()
+		} else {
+			// Recorded, not just logged. The wake is the path a user
+			// triggers by saving config, so it is the one most likely
+			// to be the first thing that breaks; leaving it silent
+			// meant a daemon repointed at an address with nothing on
+			// it answered Saved, reported healthy, and would not have
+			// mentioned the failure until the next daily tick.
+			s.recordPollError(wakeErr)
 		}
 		cancel()
 
@@ -714,6 +734,26 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Both or neither, checked here rather than beside the write.
+	//
+	// It used to be checked in the persist section, which runs after
+	// the Stash URL, the API key and the cookie clear have already been
+	// stored, so a request carrying half an X pair returned 400 having
+	// repointed the daemon at a new Stash and wiped the Reddit cookie.
+	// A settings page that posts every field on Save was one malformed
+	// field away from that. This handler's promise is that a rejected
+	// request changes nothing, and the promise has to be kept by the
+	// order of the code.
+	if req.XAuthToken != nil || req.XCT0 != nil {
+		if req.XAuthToken == nil || req.XCT0 == nil ||
+			*req.XAuthToken == "" || *req.XCT0 == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "xAuthToken and xCt0 must be set together",
+			})
+			return
+		}
+	}
+
 	// All present fields validated — persist.
 	if req.StashURL != nil {
 		if *req.StashURL == "" {
@@ -798,10 +838,6 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	// without the matching ct0 csrf token). Persisted then pushed into the
 	// twitter client so the change takes effect without a restart.
 	if req.XAuthToken != nil || req.XCT0 != nil {
-		if req.XAuthToken == nil || req.XCT0 == nil || *req.XAuthToken == "" || *req.XCT0 == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "xAuthToken and xCt0 must be set together"})
-			return
-		}
 		if err := s.store.Set(configstore.KeyXAuthToken, *req.XAuthToken); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return

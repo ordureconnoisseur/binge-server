@@ -243,11 +243,13 @@ func (p *Poller) SyncPerformers(ctx context.Context) error {
 	const pageSize = 200
 	keepStashIDs := make(map[int]bool, 1024)
 	total := 0
+	reported := 0
 	for page := 1; ; page++ {
 		performers, count, err := p.stash.FetchPerformersPage(ctx, page, pageSize)
 		if err != nil {
 			return err
 		}
+		reported = count
 		if err := p.upsertPerformersBatch(ctx, performers, keepStashIDs); err != nil {
 			return err
 		}
@@ -258,6 +260,23 @@ func (p *Poller) SyncPerformers(ctx context.Context) error {
 		if page > 200 {
 			return fmt.Errorf("performer sync exceeded 200 pages — bad pagination?")
 		}
+	}
+	// Stash says how many performers it has; anything short of that
+	// means this sync did not see the whole library.
+	//
+	// Nothing checked, and the reconcile below deletes whatever it did
+	// not see. One short page was enough: a library of 400 whose second
+	// page came back empty left 200 unseen, and since the keep-set was
+	// not empty and the removal was under half, both prune guards let
+	// it through and a hundred performers and their posts went, logged
+	// as a successful sync. That is the same failure the empty-response
+	// guard was written for, one page down, and the likelier one: a
+	// paginated API under load, a filter change, or a mid-page error
+	// returned as an empty list all produce exactly this.
+	if reported > 0 && total < reported {
+		return fmt.Errorf(
+			"stash reported %d performers but only %d arrived; not reconciling against a partial list",
+			reported, total)
 	}
 
 	// Delete performers no longer present in Stash OR no longer linked
@@ -366,6 +385,52 @@ func safeToPrune(keep, existing, removing int, sameAsLastTime bool) (bool, strin
 	return true, ""
 }
 
+// How long a proposed removal has to stand before a repeat of it
+// counts as confirmation.
+//
+// Without an interval, "the same removal twice" is satisfied by two
+// syncs seconds apart, and two of those are easy to come by: saving
+// config wakes the poller, the wake loops when another save arrives
+// while it runs, and the daily tick is a separate goroutine besides.
+// So saving twice in a row defeated the guard. A removal that is real
+// is still there in a few minutes.
+const pruneConfirmAfter = 10 * time.Minute
+
+// pruneWasOfferedBefore reports whether this exact removal was proposed
+// far enough in the past to count as confirmed now.
+func (p *Poller) pruneWasOfferedBefore(ctx context.Context, sig string) bool {
+	var stored string
+	if err := p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key='pending_prune'`).Scan(&stored); err != nil {
+		return false
+	}
+	// "<unix seconds>|<signature>"
+	sep := strings.IndexByte(stored, '|')
+	if sep < 0 || stored[sep+1:] != sig {
+		return false
+	}
+	at, err := strconv.ParseInt(stored[:sep], 10, 64)
+	if err != nil {
+		return false
+	}
+	return time.Since(time.Unix(at, 0)) >= pruneConfirmAfter
+}
+
+func (p *Poller) rememberPendingPrune(ctx context.Context, sig string) {
+	// Only stamped when the proposal changes, or the clock would be
+	// pushed forward on every refusal and the interval never elapse.
+	var stored string
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key='pending_prune'`).Scan(&stored)
+	if sep := strings.IndexByte(stored, '|'); sep >= 0 && stored[sep+1:] == sig {
+		return
+	}
+	_, _ = p.db.ExecContext(ctx,
+		`INSERT INTO sync_state(key,value) VALUES('pending_prune', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		strconv.FormatInt(time.Now().Unix(), 10)+"|"+sig)
+}
+
 // pruneSignature identifies a proposed removal, so an unusually large
 // one can be recognised when it is offered a second time.
 func pruneSignature(toDelete []int) string {
@@ -398,20 +463,21 @@ func (p *Poller) deleteMissingPerformers(ctx context.Context, keep map[int]bool)
 		return err
 	}
 	if len(toDelete) == 0 {
+		// A sync with nothing to remove is the clearest possible
+		// statement that any removal remembered from before no longer
+		// applies. Leaving the row meant "the same removal twice in a
+		// row" quietly became "twice, ever": a transient fault that
+		// proposed a removal once, recovered for weeks, then recurred,
+		// was accepted on that first recurrence.
+		_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='pending_prune'`)
 		return nil
 	}
 	var existing int
 	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performers`).Scan(&existing)
 	sig := pruneSignature(toDelete)
-	var lastSig string
-	_ = p.db.QueryRowContext(ctx,
-		`SELECT value FROM sync_state WHERE key='pending_prune'`).Scan(&lastSig)
-	if ok, why := safeToPrune(len(keep), existing, len(toDelete), sig == lastSig); !ok {
-		// Remember what was asked for, so the same answer next time is
-		// taken as confirmation rather than refused again forever.
-		_, _ = p.db.ExecContext(ctx,
-			`INSERT INTO sync_state(key,value) VALUES('pending_prune', ?)
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sig)
+	confirmed := p.pruneWasOfferedBefore(ctx, sig)
+	if ok, why := safeToPrune(len(keep), existing, len(toDelete), confirmed); !ok {
+		p.rememberPendingPrune(ctx, sig)
 		p.log.Error("refusing to prune performers for now, treating this sync as failed",
 			"reason", why,
 			"linked_in_stash", len(keep),
@@ -774,13 +840,28 @@ func (p *Poller) sweepOldPosts(ctx context.Context) error {
 	// positive cutoff, while a clock in the past yields a negative one
 	// that would have matched nothing anyway. Refuse to delete anything
 	// dated later than the newest post actually held.
-	var newest int64
-	_ = p.db.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(created_utc), 0) FROM posts`).Scan(&newest)
-	if cutoff <= 0 || (newest > 0 && cutoff > newest) {
-		p.log.Warn("retention cutoff is not sane, skipping sweep",
-			"cutoff", cutoff, "newest_post", newest)
+	// Sanity-checked against the daemon's own last successful poll
+	// rather than against the newest post.
+	//
+	// Comparing with the newest post skipped the sweep whenever every
+	// held post was older than the window, which is exactly the state a
+	// daemon reaches when its Reddit cookie expires: retention went
+	// quietly inert and the database stopped being bounded. The last
+	// poll is the better reference because the cutoff should always sit
+	// well before it; a clock jumped years forward puts it after.
+	if cutoff <= 0 {
+		p.log.Warn("retention cutoff is not sane, skipping sweep", "cutoff", cutoff)
 		return nil
+	}
+	var lastPoll string
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key='last_poll'`).Scan(&lastPoll)
+	if lastPoll != "" {
+		if t, err := time.Parse(time.RFC3339, lastPoll); err == nil && cutoff > t.Unix() {
+			p.log.Warn("retention cutoff is later than the last poll, skipping sweep",
+				"cutoff", cutoff, "last_poll", lastPoll)
+			return nil
+		}
 	}
 	// created_utc > 0 because a post whose timestamp Reddit omitted
 	// stores zero, and zero is older than every cutoff. Those were

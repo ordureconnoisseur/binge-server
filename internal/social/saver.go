@@ -321,7 +321,15 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 		// video that takes longer than that is killed mid-write;
 		// writing straight to dest left the half-file where a complete
 		// one belongs, and the next save accepted it as finished.
-		tmp := dest + ".part"
+		// Not ".part". yt-dlp treats that suffix as its own and strips
+		// it from -o, so asking for "<dest>.mp4.part" made it write
+		// "<dest>.mp4" and the rename below then failed on a file that
+		// was not there. Every PornHub save failed its first attempt,
+		// and because the finished file was sitting at the destination
+		// anyway, the second attempt short-circuited and skipped the
+		// tagging. Measured against yt-dlp 2026.03.17: ".part" is
+		// stripped, ".incoming" is honoured verbatim.
+		tmp := dest + ".incoming"
 		defer func() { _ = os.Remove(tmp) }()
 		if err := s.pornhub.Download(ctx, req.MediaURL, tmp); err != nil {
 			return err

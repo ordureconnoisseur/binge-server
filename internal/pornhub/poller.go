@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ordureconnoisseur/binge-server/internal/configstore"
@@ -87,11 +89,13 @@ func (p *Poller) SyncPerformers(ctx context.Context) error {
 	const pageSize = 200
 	keep := make(map[int]bool, 256)
 	total := 0
+	reported := 0
 	for page := 1; ; page++ {
 		performers, count, err := p.stash.FetchPerformersPage(ctx, page, pageSize)
 		if err != nil {
 			return err
 		}
+		reported = count
 		tx, err := p.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -135,11 +139,30 @@ func (p *Poller) SyncPerformers(ctx context.Context) error {
 			return fmt.Errorf("pornhub performer sync exceeded 200 pages")
 		}
 	}
+	// Same rule as the reddit poller: a short read is not a licence to
+	// delete what was not seen.
+	if reported > 0 && total < reported {
+		return fmt.Errorf(
+			"stash reported %d performers but only %d arrived; not reconciling against a partial list",
+			reported, total)
+	}
 	if err := p.deleteMissing(ctx, keep); err != nil {
 		return err
 	}
 	p.log.Info("pornhub performer sync done", "scanned", total, "with_pornhub", len(keep), "elapsed", time.Since(start))
 	return nil
+}
+
+// pruneSignature identifies a proposed removal so an unusually large
+// one can be recognised when offered again.
+func pruneSignature(ids []int) string {
+	sorted := append([]int(nil), ids...)
+	sort.Ints(sorted)
+	parts := make([]string, len(sorted))
+	for i, id := range sorted {
+		parts[i] = strconv.Itoa(id)
+	}
+	return strings.Join(parts, ",")
 }
 
 func (p *Poller) deleteMissing(ctx context.Context, keep map[int]bool) error {
@@ -159,24 +182,47 @@ func (p *Poller) deleteMissing(ctx context.Context, keep map[int]bool) error {
 		}
 	}
 	rows.Close()
-	if len(del) > 0 {
-		// Same floor as the reddit poller: a Stash that answers 200
-		// with an empty performer list is not an instruction to empty
-		// the library, and the cascade from these rows takes every
-		// stored video with it.
-		var existing int
-		_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pornhub_performers`).Scan(&existing)
-		// Deliberately identical to the reddit poller's rule, which a
-		// previous comment claimed while using > where that one uses
-		// >=. Only the empty answer is refused outright here; a large
-		// removal is left to the reddit side's confirm-by-repetition,
-		// since these two tables are reconciled from the same Stash.
-		if existing > 0 && len(keep) == 0 {
-			p.log.Error("refusing to prune pornhub performers, treating this sync as failed",
+	if len(del) == 0 {
+		// A clean sync forgets any removal remembered from before.
+		_, _ = p.db.ExecContext(ctx,
+			`DELETE FROM sync_state WHERE key='pending_prune_pornhub'`)
+		return nil
+	}
+	// Confirmed by repetition, exactly as the reddit poller does it,
+	// and with its own remembered signature.
+	//
+	// A previous version guarded only the empty answer here, reasoning
+	// that a large removal would be caught by the reddit side because
+	// both tables are reconciled from the same Stash. That was wrong on
+	// two counts: the two tables are built from different subsets of
+	// that Stash, so one can lose most of its rows while the other
+	// loses none, and this deletion commits before the reddit poller's
+	// refusal happens at all. Three of four performers, and the videos
+	// cached against them, went in a single sync while the reddit side
+	// was busy refusing.
+	var existing int
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pornhub_performers`).Scan(&existing)
+	sig := pruneSignature(del)
+	var lastSig string
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key='pending_prune_pornhub'`).Scan(&lastSig)
+	if existing > 0 {
+		refuse := len(keep) == 0
+		if !refuse && len(del)*2 >= existing && sig != lastSig {
+			refuse = true
+		}
+		if refuse {
+			_, _ = p.db.ExecContext(ctx,
+				`INSERT INTO sync_state(key,value) VALUES('pending_prune_pornhub', ?)
+				 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sig)
+			p.log.Error("refusing to prune pornhub performers for now",
 				"linked_in_stash", len(keep), "in_db", existing, "would_remove", len(del))
 			return fmt.Errorf("refusing to prune pornhub performers")
 		}
 	}
+	_, _ = p.db.ExecContext(ctx,
+		`DELETE FROM sync_state WHERE key='pending_prune_pornhub'`)
 	for _, id := range del {
 		if _, err := p.db.ExecContext(ctx, `DELETE FROM pornhub_performers WHERE stash_id=?`, id); err != nil {
 			return err

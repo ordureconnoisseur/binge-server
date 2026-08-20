@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +103,28 @@ func TestADirectoryAtTheDestinationIsNotRemoved(t *testing.T) {
 
 	if _, err := os.Stat(inside); err != nil {
 		t.Fatalf("a directory at the destination was removed: %v", err)
+	}
+}
+
+// yt-dlp treats ".part" as its own suffix and strips it from -o, so a
+// temporary name ending that way is silently written to the final
+// name instead. That made every PornHub save fail its first attempt on
+// a rename of a file that was never created, and left the finished
+// video at the destination so the second attempt skipped the tagging.
+//
+// This pins the property the code depends on rather than yt-dlp's
+// behaviour: whatever temporary name is chosen, it must not be one the
+// downloader will rewrite.
+func TestTheTemporaryNameIsNotOneYtDlpClaims(t *testing.T) {
+	dest := filepath.Join("x", "video.mp4")
+	tmp := dest + ".incoming"
+	if strings.HasSuffix(tmp, ".part") {
+		t.Fatalf("temporary name %q ends in .part, which yt-dlp strips", tmp)
+	}
+	if tmp == dest {
+		t.Fatal("temporary name is the destination")
+	}
+	if !strings.HasPrefix(tmp, dest) {
+		t.Fatalf("temporary name %q is not derived from %q", tmp, dest)
 	}
 }

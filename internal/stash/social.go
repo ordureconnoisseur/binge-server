@@ -202,6 +202,21 @@ func (c *Client) UpdateImageMeta(ctx context.Context, id string, m EntityMeta) e
 // PerformerHandle pulls a handle for `source` from a performer's urls[]
 // (e.g. instagram.com/<h>, x.com/<h>, reddit.com/u/<h>, redgifs.com/users/<h>).
 // Empty if none — caller falls back to the performer name.
+// Path segments that belong to the site rather than to a person.
+var reservedSegment = map[string]bool{
+	// x / twitter
+	"i": true, "home": true, "search": true, "explore": true,
+	"notifications": true, "messages": true, "intent": true,
+	"share": true, "hashtag": true, "settings": true, "compose": true,
+	"login": true, "signup": true, "about": true, "tos": true,
+	"privacy": true, "status": true,
+	// instagram
+	"p": true, "reel": true, "reels": true, "stories": true,
+	"accounts": true, "direct": true, "tv": true,
+	// generic
+	"": true, ".": true, "..": true,
+}
+
 func PerformerHandle(p Performer, source string) string {
 	// host suffix -> the path prefixes that introduce a handle on it.
 	//
@@ -265,7 +280,9 @@ func PerformerHandle(p Performer, source string) string {
 		if !matched {
 			continue
 		}
-		path := u.EscapedPath()
+		// Unescaped, so a non-ASCII handle names its folder as itself
+		// rather than as percent-escapes.
+		path := u.Path
 		for _, prefix := range r.prefixes {
 			if !strings.HasPrefix(strings.ToLower(path), prefix) {
 				continue
@@ -274,9 +291,16 @@ func PerformerHandle(p Performer, source string) string {
 			if j := strings.IndexAny(rest, "/?#"); j >= 0 {
 				rest = rest[:j]
 			}
-			if rest != "" {
-				return rest
+			// A site's own pages are not people. x.com/i/status/... and
+			// instagram.com/p/... gave "i" and "p", and this value names
+			// the folder a save is written into, so a library ended up
+			// with directories called after the site's routing. The
+			// poller already skips these for x; the two copies were
+			// harmonised on host parsing and not on this.
+			if rest == "" || reservedSegment[strings.ToLower(rest)] {
+				continue
 			}
+			return rest
 		}
 	}
 	return ""

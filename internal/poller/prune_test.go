@@ -2,7 +2,9 @@ package poller
 
 import (
 	"context"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/ordureconnoisseur/binge-server/internal/stash"
 )
@@ -79,5 +81,53 @@ func TestCorrectingAHandleRevivesIt(t *testing.T) {
 	}
 	if got := statusOf(t, p, 2); got != "unavailable" {
 		t.Fatalf("an unchanged handle was revived anyway: %q", got)
+	}
+}
+
+// "The same removal twice" has to mean twice over time. Two syncs
+// seconds apart are easy to come by - saving config wakes the poller,
+// the wake loops when another save lands while it runs, and the daily
+// tick is a separate goroutine - so without an interval, saving twice
+// in a row defeated the guard entirely.
+func TestConfirmationNeedsAnInterval(t *testing.T) {
+	p := testPoller(t)
+	ctx := context.Background()
+	const sig = "105,106,107,108"
+
+	// First offer: remembered, not confirmed.
+	p.rememberPendingPrune(ctx, sig)
+	if p.pruneWasOfferedBefore(ctx, sig) {
+		t.Fatal("a removal was confirmed the instant it was proposed")
+	}
+
+	// A second sync moments later must not confirm it either, and must
+	// not push the timestamp forward.
+	p.rememberPendingPrune(ctx, sig)
+	if p.pruneWasOfferedBefore(ctx, sig) {
+		t.Fatal("a second sync moments later confirmed it")
+	}
+
+	// Backdate the stored proposal past the interval.
+	old := time.Now().Add(-pruneConfirmAfter - time.Minute).Unix()
+	if _, err := p.db.Exec(
+		`INSERT INTO sync_state(key,value) VALUES('pending_prune', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		strconv.FormatInt(old, 10)+"|"+sig,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !p.pruneWasOfferedBefore(ctx, sig) {
+		t.Fatal("a removal standing longer than the interval was not confirmed")
+	}
+
+	// A different removal is never confirmed by the stored one.
+	if p.pruneWasOfferedBefore(ctx, "1,2,3") {
+		t.Fatal("a different removal was confirmed by a stale signature")
+	}
+
+	// Re-proposing after it aged must not reset the clock.
+	p.rememberPendingPrune(ctx, sig)
+	if !p.pruneWasOfferedBefore(ctx, sig) {
+		t.Fatal("re-proposing the same removal reset its age")
 	}
 }
