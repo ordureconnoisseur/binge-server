@@ -362,13 +362,35 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	var performerCount, postCount int
 	_ = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM performers`).Scan(&performerCount)
 	_ = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM posts`).Scan(&postCount)
-	configured := s.store.Get(configstore.KeyStashURL) != "" &&
-		s.store.Get(configstore.KeyStashAPIKey) != "" &&
-		s.store.Get(configstore.KeyRedditCookie) != ""
+	// Per pillar, because one boolean over all three was wrong in both
+	// directions. It read true for a daemon holding nothing but bogus
+	// seeded values, which is what the container healthcheck polls, so
+	// docker ps said healthy while every request to Stash was rejected.
+	// And it read false forever for a working PornHub-only setup, since
+	// PornHub needs no cookie and the flag demanded one.
+	//
+	// Stash being reachable is the only thing that can be reported
+	// honestly here without making a network call per health check, so
+	// the counts and timestamps beside it are what say whether the
+	// daemon is doing anything.
+	stashSet := s.store.Get(configstore.KeyStashURL) != "" &&
+		s.store.Get(configstore.KeyStashAPIKey) != ""
+	pillars := map[string]bool{
+		"stash":   stashSet,
+		"reddit":  stashSet && s.store.Get(configstore.KeyRedditCookie) != "",
+		"x":       stashSet && s.store.Get(configstore.KeyXAuthToken) != "" && s.store.Get(configstore.KeyXCT0) != "",
+		"pornhub": stashSet,
+		"save":    s.saver != nil && s.saver.Configured(),
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                    true,
-		"version":               s.version,
-		"configured":            configured,
+		"ok":      true,
+		"version": s.version,
+		// Kept for older plugin builds that read it. Now means "Stash
+		// credentials are present", which is the thing every pillar
+		// needs and the only one worth gating on.
+		"configured":            stashSet,
+		"pillars":               pillars,
+		"lastPollError":         state["last_poll_error"],
 		"lastPerformerSync":     state["last_performer_sync"],
 		"lastPoll":              state["last_poll"],
 		"redditCookieExpiredAt": state["reddit_cookie_expired_at"],

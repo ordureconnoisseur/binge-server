@@ -116,9 +116,11 @@ func (p *Poller) Run(ctx context.Context) {
 	if p.applyConfig() {
 		if err := p.SyncPerformers(ctx); err != nil {
 			p.log.Error("initial performer sync failed", "err", err)
+			p.recordPollError(ctx, err)
 		}
 		if err := p.PollAll(ctx); err != nil {
 			p.log.Error("initial poll failed", "err", err)
+			p.recordPollError(ctx, err)
 		}
 	}
 
@@ -139,6 +141,7 @@ func (p *Poller) Run(ctx context.Context) {
 			}
 			if err := p.SyncPerformers(ctx); err != nil {
 				p.log.Error("performer sync failed", "err", err)
+				p.recordPollError(ctx, err)
 			}
 		case <-pollTick.C:
 			if !p.applyConfig() {
@@ -146,6 +149,7 @@ func (p *Poller) Run(ctx context.Context) {
 			}
 			if err := p.PollAll(ctx); err != nil {
 				p.log.Error("poll failed", "err", err)
+				p.recordPollError(ctx, err)
 			}
 		case <-retentionTick.C:
 			if err := p.sweepOldPosts(ctx); err != nil {
@@ -421,6 +425,9 @@ func (p *Poller) PollAll(ctx context.Context) error {
 	// first shape of this, steers them away from the fix that works in
 	// the common case; the banner names the address as the fallback.
 	p.setCookieExpired(ctx, expired || blanketRefusal, succeeded > 0)
+	if succeeded > 0 {
+		p.recordPollError(ctx, nil)
+	}
 
 	_, _ = p.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('last_poll', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, time.Now().UTC().Format(time.RFC3339))
@@ -442,6 +449,19 @@ func (p *Poller) setCookieExpired(ctx context.Context, expired, sawSuccess bool)
 	if sawSuccess {
 		_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
 	}
+}
+
+// recordPollError keeps the last reason a cycle failed where /healthz
+// can read it. A daemon that is running but achieving nothing looked
+// identical to a healthy one from outside, which is most of why a
+// broken setup is so hard to tell from a working one.
+func (p *Poller) recordPollError(ctx context.Context, err error) {
+	if err == nil {
+		_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='last_poll_error'`)
+		return
+	}
+	_, _ = p.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('last_poll_error', ?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, err.Error())
 }
 
 // configGeneration is bumped whenever credentials change. Compared
