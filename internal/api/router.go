@@ -542,13 +542,35 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 			// an unauthenticated port scanner otherwise.
 			detail := err.Error()
 			if firstRunPublicClaim {
-				detail = "could not reach that Stash"
+				// Reaching Stash and being refused is not a secret from
+				// someone who already reached this daemon, and calling
+				// it a network problem sent people with a mistyped key
+				// to go and check their firewall. What must not leak is
+				// which hosts and ports are open, so only the dial
+				// failures are flattened.
+				if errors.Is(err, errStashRejectedKey) {
+					detail = "that Stash rejected the key"
+				} else {
+					detail = "could not reach that Stash"
+				}
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stash api key rejected: " + detail})
 			return
 		}
 	}
 
+	// An empty string is a request to forget the cookie, not a no-op.
+	// The pointer type exists precisely to tell absent from empty, and
+	// answering ok to someone clearing a stale value while keeping it
+	// is the worst of both.
+	if req.RedditSessionCookie != nil && *req.RedditSessionCookie == "" {
+		if err := s.store.Set(configstore.KeyRedditCookie, ""); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
+			return
+		}
+		_, _ = s.db.ExecContext(r.Context(),
+			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
+	}
 	if req.RedditSessionCookie != nil && *req.RedditSessionCookie != "" {
 		// Cheap and specific first. Reddit answers 403 to anything it
 		// does not recognise, so without this a typo and a blocked
@@ -651,6 +673,11 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// errStashRejectedKey means Stash answered and refused the key, as
+// opposed to never being reached at all. The difference decides what a
+// first-run caller is told, so it is worth a sentinel.
+var errStashRejectedKey = errors.New("stash rejected the api key")
+
 // probeStashAPIKey runs a trivial GraphQL query against the given
 // Stash URL with the candidate API key. A 200 OK confirms the key is
 // valid; anything else (auth error, network failure) is reported back.
@@ -684,6 +711,9 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: stash returned %d", errStashRejectedKey, resp.StatusCode)
+	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("stash returned %d", resp.StatusCode)
 	}
@@ -695,7 +725,7 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
 	_ = json.Unmarshal(raw, &wrap)
 	if len(wrap.Errors) > 0 {
-		return errors.New(wrap.Errors[0].Message)
+		return fmt.Errorf("%w: %s", errStashRejectedKey, wrap.Errors[0].Message)
 	}
 	return nil
 }

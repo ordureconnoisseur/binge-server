@@ -18,6 +18,17 @@ services:
       # expose it to the internet.
       - "127.0.0.1:7878:7878"
 
+    environment:
+      # Where YOUR Stash is, from inside this container. The daemon's
+      # own default is http://localhost:9999, which in here means this
+      # container and never your Stash, so the first boot logs a
+      # connection failure against an address that cannot work.
+      #
+      # Stash on this same host: use host.docker.internal on Docker
+      # Desktop, or your machine's LAN address on Linux. Stash in a
+      # container on this network: use its service name.
+      - STASH_URL=http://host.docker.internal:9999
+
     volumes:
       # SQLite DB + the generated gallery-dl cookie config.
       - ./data:/data
@@ -27,11 +38,10 @@ services:
       # out and Save simply stays off.
       # - /path/to/your/library/social:/media/social
 
-    # Uncomment the `environment:` key below along with whichever
-    # settings you need — a bare `environment:` with everything commented
-    # out is a compose error ("must be a mapping"), not an empty block.
+    # Everything below goes under the `environment:` key above. Add the
+    # lines you need there; do not start a second `environment:` block,
+    # which is a duplicate-key error.
     #
-    # environment:
     #   # Where POST /save writes, as this container sees it.
     #   - BINGE_SOCIAL_WRITE_ROOT=/media/social
     #   # The same location as STASH sees it. These differ whenever Stash
