@@ -157,7 +157,7 @@ These are stored in SQLite (`binge-server.db`, in `/data` if you mounted the Doc
 | `BINGE_SOCIAL_WRITE_ROOT` | _(unset)_ | Where `POST /save` writes downloaded media. Save is disabled until this is set |
 | `BINGE_SOCIAL_STASH_ROOT` | _(unset)_ | The same location as Stash sees it, when the daemon's path differs (e.g. in Docker) |
 | `BINGE_PERFORMER_SYNC_INTERVAL` | `24h` | How often to re-scan Stash for new performer Reddit URLs |
-| `STASH_URL` | `http://localhost:9999` | Initial-seed-only — overrideable via UI |
+| `STASH_URL` | `http://localhost:9999` | Initial seed. There is no UI field for it, so set it here if the daemon is not on the Stash host. Inside Docker the default points at the container itself, not your Stash |
 | `STASH_API_KEY` | (empty) | Initial seed — auto-detected from Stash same-origin in normal use |
 | `REDDIT_SESSION_COOKIE` | (empty) | Initial seed — paste via UI in normal use |
 | `X_AUTH_TOKEN` | (empty) | Initial seed — paste via UI in normal use |
@@ -182,9 +182,12 @@ The other pillars key off the same `urls` field:
 
 A performer with none of these is simply not polled — there's no cost to leaving them unset.
 
-The full re-scan happens every 24 hours by default. Add a Reddit URL to a performer in Stash, then trigger a manual sync with `curl -X POST localhost:7878/reddit/refresh` to pick it up immediately.
+The full re-scan happens every 24 hours by default, and also whenever you save credentials from the binge settings page, which is what makes a freshly configured daemon start working straight away instead of at this time tomorrow. `POST /reddit/refresh` polls the performers already known; it does not re-scan Stash for new ones.
 
 ## HTTP API
+
+Every route except `/healthz` requires the Stash API key once one is stored, sent as `ApiKey: <key>`, `Authorization: Bearer <key>`, or `?apikey=<key>`. The curl examples below need it too.
+
 
 | Method | Path | Description |
 |-|-|-|

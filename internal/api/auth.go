@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ordureconnoisseur/binge-server/internal/configstore"
 )
@@ -86,13 +88,69 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		if !credentialMatches(r, want) {
+			// Rotating the key in Stash used to lock the daemon out for
+			// good. The browser holds the new key, the daemon still
+			// wants the old one, so the write that would fix it needs
+			// the credential it is trying to replace. Every route
+			// answered 401 including /config, and the only way back was
+			// to delete the database and lose every stored post.
+			//
+			// A caller from the local network holding a key that this
+			// daemon's own Stash accepts has exactly the authority the
+			// stored key was standing in for, so let that through to
+			// POST /config and no further. It proves the claim against
+			// Stash rather than believing it: an attacker would need a
+			// working key for a Stash they must already be positioned
+			// to reach.
+			if s.allowKeyRotation(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
-				"error": "missing or invalid Stash API key",
+				"error": "missing or invalid Stash API key. If you rotated the key in Stash, " +
+					"open binge from that Stash on the same network and it will re-send it.",
 			})
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowKeyRotation reports whether a request presenting the wrong key
+// should still be allowed to replace it.
+//
+// Deliberately narrow. Only POST /config, only from a private address,
+// and only when the presented key is one the configured Stash itself
+// accepts. The last condition is the load-bearing one: it is checked
+// against the Stash this daemon is already pointed at, whose address
+// stashURLAllowed has restricted to the local network, so it cannot be
+// satisfied by someone who is not already there.
+func (s *Server) allowKeyRotation(r *http.Request) bool {
+	if r.Method != http.MethodPost || r.URL.Path != "/config" {
+		return false
+	}
+	if !requestFromPrivateIP(r) {
+		return false
+	}
+	presented := presentedCredential(r)
+	if presented == "" {
+		return false
+	}
+	stashURL := s.store.Get(configstore.KeyStashURL)
+	if stashURL == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	if err := probeStashAPIKey(ctx, stashURL, presented); err != nil {
+		return false
+	}
+	// An authless Stash accepts anything, so a pass there proves
+	// nothing. Same negative control the first-run claim uses.
+	if err := probeStashAPIKey(ctx, stashURL, bogusProbeKey); err == nil {
+		return false
+	}
+	return true
 }
 
 // credentialMatches accepts the key the way Stash does, plus Bearer.
@@ -114,6 +172,20 @@ func credentialMatches(r *http.Request, want string) bool {
 		return secureEqual(v, want)
 	}
 	return false
+}
+
+// presentedCredential returns the key the caller sent, in the same
+// three places credentialMatches looks for it.
+func presentedCredential(r *http.Request) string {
+	if v := r.Header.Get(apiKeyHeader); v != "" {
+		return v
+	}
+	if v := r.Header.Get("Authorization"); v != "" {
+		if after, ok := strings.CutPrefix(v, "Bearer "); ok {
+			return strings.TrimSpace(after)
+		}
+	}
+	return r.URL.Query().Get(apiKeyParam)
 }
 
 func secureEqual(got, want string) bool {

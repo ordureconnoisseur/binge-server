@@ -31,6 +31,18 @@ import (
 // The router debounces and dispatches it to a goroutine on /refresh.
 type Poller interface {
 	PollAll(ctx context.Context) error
+	// Re-read credentials into the clients without waiting for a tick.
+	ApplyConfig() bool
+	// Scan Stash for performers and their Reddit URLs. Polling reads
+	// the table this fills, so on a fresh daemon nothing can happen
+	// until it has run once.
+	SyncPerformers(ctx context.Context) error
+}
+
+// PillarPoller is a feed with its own performer scan that should be
+// woken when credentials change. PornHub has one; more may follow.
+type PillarPoller interface {
+	SyncPerformers(ctx context.Context) error
 }
 
 type Server struct {
@@ -57,6 +69,9 @@ type Server struct {
 	phOwned    *phOwnedCache
 
 	allowedOrigins []string // CORS allowlist (parsed); loopback always OK
+
+	// Woken alongside the Reddit poller when credentials change.
+	pillars []PillarPoller
 
 	// The User-Agent the poller sends. The cookie probe has to send the
 	// same one: Reddit's answer depends on who is asking, so validating
@@ -87,6 +102,53 @@ func New(db *sql.DB, store *configstore.Store, poller Poller, stashClient *stash
 		// Empty in tests, where the probe is never expected to agree
 		// with a poller that does not exist.
 		redditUserAgent: redditUserAgent,
+	}
+}
+
+// logWarn is log.Warn that tolerates a Server built without a logger.
+func (s *Server) logWarn(msg string, args ...any) {
+	if s.log == nil {
+		return
+	}
+	s.log.Warn(msg, args...)
+}
+
+// AddPillarPoller registers a feed to be woken when config changes.
+func (s *Server) AddPillarPoller(p PillarPoller) {
+	s.pillars = append(s.pillars, p)
+}
+
+// wakePillars makes new credentials count immediately.
+//
+// Configuring a fresh daemon used to leave it completely idle: the
+// performer table was empty, so polling had nobody to poll, and the
+// scan that fills it was up to 24 hours away. The UI said Saved, the
+// daemon logged nothing, and the only cure was a restart. Nobody would
+// guess that, so the daemon does it instead.
+//
+// Runs detached, on its own context: the request's context is cancelled
+// as soon as the response is written, and a full scan outlives that by
+// minutes.
+func (s *Server) wakePillars() {
+	// Runs in a goroutine, so a nil dependency here takes the whole
+	// daemon down rather than failing one request. Tests build a Server
+	// without a poller, and so could a future caller.
+	if s.poller == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	s.poller.ApplyConfig()
+	if err := s.poller.SyncPerformers(ctx); err != nil {
+		s.logWarn("performer sync after config change failed", "err", err)
+	} else if err := s.poller.PollAll(ctx); err != nil {
+		s.logWarn("poll after config change failed", "err", err)
+	}
+	for _, p := range s.pillars {
+		if err := p.SyncPerformers(ctx); err != nil {
+			s.logWarn("pillar sync after config change failed", "err", err)
+		}
 	}
 }
 
@@ -415,9 +477,11 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	// Restrict the Stash destination to loopback/private/tailnet so a
 	// config write can't repoint the stored API key at a public host
 	// (credential exfiltration). Public IPs / FQDNs are rejected.
-	if req.StashURL != nil && *req.StashURL != "" && !stashURLAllowed(*req.StashURL) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stashUrl must be a loopback, private, or tailnet address"})
-		return
+	if req.StashURL != nil && *req.StashURL != "" {
+		if problem := stashURLProblem(*req.StashURL); problem != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": problem})
+			return
+		}
 	}
 
 	// Validate first, persist after. We need the destination URL to be
@@ -464,6 +528,13 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.RedditSessionCookie != nil && *req.RedditSessionCookie != "" {
+		// Cheap and specific first. Reddit answers 403 to anything it
+		// does not recognise, so without this a typo and a blocked
+		// address are the same message.
+		if problem := reddit.CookieShapeProblem(*req.RedditSessionCookie); problem != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reddit cookie rejected: " + problem})
+			return
+		}
 		if err := probeRedditCookie(r.Context(), *req.RedditSessionCookie, s.redditUserAgent); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reddit cookie rejected: " + err.Error()})
 			return
@@ -547,6 +618,12 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 			s.store.Get(configstore.KeySocialWriteRoot),
 			s.store.Get(configstore.KeySocialStashRoot),
 		)
+	}
+
+	// Credentials just changed, so make them count now rather than at
+	// some point in the next day.
+	if req.StashURL != nil || req.StashAPIKey != nil || req.RedditSessionCookie != nil {
+		go s.wakePillars()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

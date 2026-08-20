@@ -66,7 +66,22 @@ func main() {
 		_ = store.SetIfEmpty(configstore.KeyStashURL, v)
 	}
 	_ = store.SetIfEmpty(configstore.KeyStashAPIKey, cfg.stashAPIKey)
-	_ = store.SetIfEmpty(configstore.KeyRedditCookie, cfg.redditCookie)
+	// Normalised on the way in, not only when the client reads it. The
+	// stored row is what the settings page reports and what a future
+	// reader sees, and leaving a bare value in there meant the database
+	// disagreed with the header actually being sent.
+	_ = store.SetIfEmpty(configstore.KeyRedditCookie, reddit.NormalizeCookie(cfg.redditCookie))
+	// Seeded credentials skip every check the UI performs, so say
+	// something about the ones that are obviously wrong rather than
+	// leaving the user with a silent daemon and no signal at all.
+	if problem := reddit.CookieShapeProblem(cfg.redditCookie); cfg.redditCookie != "" && problem != "" {
+		log.Warn("REDDIT_SESSION_COOKIE looks wrong", "problem", problem)
+	}
+	if (cfg.xAuthToken == "") != (cfg.xCT0 == "") {
+		log.Warn("X_AUTH_TOKEN and X_CT0 must be set together, so the X pillar stays off",
+			"x_auth_token_set", cfg.xAuthToken != "",
+			"x_ct0_set", cfg.xCT0 != "")
+	}
 	_ = store.SetIfEmpty(configstore.KeyXAuthToken, cfg.xAuthToken)
 	_ = store.SetIfEmpty(configstore.KeyXCT0, cfg.xCT0)
 	_ = store.SetIfEmpty(configstore.KeySocialWriteRoot, cfg.socialWriteRoot)
@@ -109,6 +124,9 @@ func main() {
 
 	server := api.New(database, store, pollerSvc, stashClient, twitterClient, saverSvc, pornhubClient, log.With("component", "api"), cfg.allowedOrigin, cfg.redditUserAgent)
 	server.SetVersion(Version)
+	// So configuring the daemon wakes this pillar too, instead of
+	// leaving it until its own 24h scan comes round.
+	server.AddPillarPoller(pornhubPoller)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

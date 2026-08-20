@@ -84,3 +84,35 @@ func TestClientNormalizesOnBothPaths(t *testing.T) {
 		t.Fatalf("SetCookie kept %q", got)
 	}
 }
+
+// Reddit answers 403 to anything it does not recognise, so without a
+// shape check first, a typo and a blocked address read identically.
+func TestCookieShapeProblem(t *testing.T) {
+	named := []struct {
+		name string
+		in   string
+	}{
+		{"the Name column copied instead of the Value", "reddit_session"},
+		{"a jar of other cookies with no session in it", "csv=1; edgebucket=xyz"},
+		{"nothing at all", "   "},
+	}
+	for _, c := range named {
+		t.Run(c.name, func(t *testing.T) {
+			if CookieShapeProblem(c.in) == "" {
+				t.Fatalf("CookieShapeProblem(%q) said nothing was wrong", c.in)
+			}
+		})
+	}
+
+	// Anything shaped like a session is Reddit's to judge, not ours.
+	plausible := []string{
+		"eyJhbGciOiJIUzUxMiJ9.abc.def",
+		"reddit_session=eyJhbGciOiJIUzUxMiJ9.abc.def",
+		"reddit_session=abc; csv=1",
+	}
+	for _, in := range plausible {
+		if got := CookieShapeProblem(in); got != "" {
+			t.Fatalf("CookieShapeProblem(%q) = %q, want no complaint", in, got)
+		}
+	}
+}

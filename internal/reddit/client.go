@@ -61,6 +61,29 @@ func (c *Client) SetCookie(cookie string) {
 	c.mu.Unlock()
 }
 
+// CookieShapeProblem names an obviously wrong paste, or returns "" when
+// the value is at least shaped like a session and worth asking Reddit
+// about.
+//
+// NormalizeCookie already recognises these mistakes and deliberately
+// lets them fail the probe. That was a waste of what it knew: every one
+// of them came back as the same 403, whose message leads with Reddit
+// refusing the daemon's address. True in general, useless to someone
+// who has simply copied the wrong column, and it is the one explanation
+// they cannot act on.
+func CookieShapeProblem(raw string) string {
+	s := strings.Trim(strings.TrimSpace(raw), "; ")
+	switch {
+	case s == "":
+		return "no cookie value"
+	case s == "reddit_session":
+		return "that is the cookie's name, not its value. Copy the Value column of the reddit_session row, which is a long string"
+	case strings.Contains(s, ";") && !strings.Contains(s, "reddit_session"):
+		return "that looks like a row of cookies with no reddit_session among them. Make sure you are signed in to reddit.com, then copy the reddit_session row"
+	}
+	return ""
+}
+
 // NormalizeCookie turns whatever the user pasted into a usable Cookie
 // header.
 //

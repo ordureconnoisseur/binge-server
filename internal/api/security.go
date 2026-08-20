@@ -61,10 +61,26 @@ func isPrivateOrigin(origin string) bool {
 // even a config write can't repoint the stored Stash API key at a public
 // attacker-controlled host, because the daemon refuses to send it anywhere
 // but the local network / tailnet.
-func stashURLAllowed(raw string) bool {
+func stashURLAllowed(raw string) bool { return stashURLProblem(raw) == "" }
+
+// stashURLProblem returns a sentence naming what is wrong with a Stash
+// URL, or "" when nothing is.
+//
+// Three quite different mistakes used to share one message about
+// loopback and private addresses. The commonest by far is pasting the
+// GraphQL endpoint, which people copy out of Stash's own playground,
+// and being told that http://localhost:9999/graphql is not a local
+// address sends them to look at their network instead of their URL.
+func stashURLProblem(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return false
+	if err != nil {
+		return "stashUrl is not a URL"
+	}
+	if u.Scheme == "" {
+		return "stashUrl needs a scheme, for example http://localhost:9999"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "stashUrl must start with http:// or https://"
 	}
 	// Only a bare origin. Callers build a target by appending a path to
 	// this value, so a query or fragment would swallow that path and a
@@ -73,12 +89,18 @@ func stashURLAllowed(raw string) bool {
 	// which answers 200 to a body it does not understand and so passes
 	// for a working Stash.
 	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return false
+		return "stashUrl should be just the address of your Stash, with no query or login part"
 	}
 	if u.Path != "" && u.Path != "/" {
-		return false
+		if strings.EqualFold(strings.TrimRight(u.Path, "/"), "/graphql") {
+			return "stashUrl should be the address of Stash itself, not its GraphQL endpoint: drop the /graphql"
+		}
+		return "stashUrl should be the address of Stash itself, with nothing after the port"
 	}
-	return isPrivateHost(u.Hostname())
+	if !isPrivateHost(u.Hostname()) {
+		return "stashUrl must be a loopback, private, or tailnet address"
+	}
+	return ""
 }
 
 // isPrivateHost reports whether a hostname is loopback, an RFC1918 private

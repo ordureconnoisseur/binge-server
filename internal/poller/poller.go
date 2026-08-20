@@ -75,6 +75,15 @@ func (p *Poller) applyConfig() bool {
 	stashURL := p.store.Get(configstore.KeyStashURL)
 	apiKey := p.store.Get(configstore.KeyStashAPIKey)
 	cookie := p.store.Get(configstore.KeyRedditCookie)
+	// Stash credentials are pushed as soon as they exist, whether or not
+	// Reddit is set up. They used to be withheld until all three were
+	// present, which left the shared Stash client uncredentialed for
+	// anyone using only the PornHub pillar, documented as needing no
+	// credentials at all. That pillar then answered nothing until the
+	// daemon was restarted, and nothing said why.
+	if stashURL != "" && apiKey != "" {
+		p.stash.SetCredentials(stashURL, apiKey)
+	}
 	if stashURL == "" || apiKey == "" || cookie == "" {
 		p.warnMu.Lock()
 		if time.Since(p.lastWarnedAt) > time.Hour {
@@ -87,10 +96,14 @@ func (p *Poller) applyConfig() bool {
 		p.warnMu.Unlock()
 		return false
 	}
-	p.stash.SetCredentials(stashURL, apiKey)
 	p.reddit.SetCookie(cookie)
 	return true
 }
+
+// ApplyConfig re-reads credentials and pushes them into the clients.
+// Exported so the API can call it the moment config changes, rather
+// than leaving a correctly configured daemon idle until the next tick.
+func (p *Poller) ApplyConfig() bool { return p.applyConfig() }
 
 // Run starts the two background loops + retention sweep. Returns when
 // ctx is cancelled.
