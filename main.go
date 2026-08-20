@@ -82,8 +82,12 @@ func main() {
 			"x_auth_token_set", cfg.xAuthToken != "",
 			"x_ct0_set", cfg.xCT0 != "")
 	}
-	_ = store.SetIfEmpty(configstore.KeyXAuthToken, cfg.xAuthToken)
-	_ = store.SetIfEmpty(configstore.KeyXCT0, cfg.xCT0)
+	// Both or neither. Half a pair is useless to the X client and only
+	// sits in the database looking like configuration.
+	if cfg.xAuthToken != "" && cfg.xCT0 != "" {
+		_ = store.SetIfEmpty(configstore.KeyXAuthToken, cfg.xAuthToken)
+		_ = store.SetIfEmpty(configstore.KeyXCT0, cfg.xCT0)
+	}
 	_ = store.SetIfEmpty(configstore.KeySocialWriteRoot, cfg.socialWriteRoot)
 	_ = store.SetIfEmpty(configstore.KeySocialStashRoot, cfg.socialStashRoot)
 

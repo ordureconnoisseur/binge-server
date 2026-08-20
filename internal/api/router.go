@@ -119,6 +119,13 @@ func New(db *sql.DB, store *configstore.Store, poller Poller, stashClient *stash
 	}
 }
 
+// clearPollError forgets the last poll failure once something has
+// worked. Kept here rather than in the poller because the wake path is
+// the one place a failure can be resolved without a poll cycle running.
+func (s *Server) clearPollError() {
+	_, _ = s.db.Exec(`DELETE FROM sync_state WHERE key='last_poll_error'`)
+}
+
 // logWarn is log.Warn that tolerates a Server built without a logger.
 func (s *Server) logWarn(msg string, args ...any) {
 	if s.log == nil {
@@ -171,17 +178,30 @@ func (s *Server) wakePillars() {
 
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		s.poller.ApplyConfig()
+		// ApplyConfig reports whether Reddit is set up, and that answer
+		// was being discarded. Polling anyway meant the first config
+		// POST, which is Stash only in the normal setup order, fired
+		// the whole performer list at Reddit with no cookie: sixty
+		// anonymous requests, a 429, and the daemon's own address
+		// nearer to being refused. Exactly what the poller's comment
+		// warns against.
+		redditReady := s.poller.ApplyConfig()
 		if err := s.poller.SyncPerformers(ctx); err != nil {
 			s.logWarn("performer sync after config change failed", "err", err)
-		} else if err := s.poller.PollAll(ctx); err != nil {
-			s.logWarn("poll after config change failed", "err", err)
+		} else if redditReady {
+			if err := s.poller.PollAll(ctx); err != nil {
+				s.logWarn("poll after config change failed", "err", err)
+			}
 		}
 		for _, p := range s.pillars {
 			if err := p.SyncPerformers(ctx); err != nil {
 				s.logWarn("pillar sync after config change failed", "err", err)
 			}
 		}
+		// A wake that got through says as much as a poll cycle does,
+		// and without this the last failure stayed on /healthz after
+		// the credentials that caused it had been replaced.
+		s.clearPollError()
 		cancel()
 
 		s.wakeMu.Lock()
@@ -430,16 +450,27 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		// Kept for older plugin builds that read it. Now means "Stash
 		// credentials are present", which is the thing every pillar
 		// needs and the only one worth gating on.
-		"configured":            stashSet,
-		"pillars":               pillars,
-		"lastPollError":         state["last_poll_error"],
-		"lastPerformerSync":     state["last_performer_sync"],
-		"lastPoll":              state["last_poll"],
-		"redditCookieExpiredAt": state["reddit_cookie_expired_at"],
-		"performerCount":        performerCount,
-		"postCount":             postCount,
+		"configured":        stashSet,
+		"pillars":           pillars,
+		"lastPollError":     state["last_poll_error"],
+		"lastPerformerSync": state["last_performer_sync"],
+		"lastPoll":          state["last_poll"],
+		// Masked when no cookie is stored, the way GET /config does it:
+		// a daemon that never had one has not had one expire.
+		"redditCookieExpiredAt": func() string {
+			if s.store.Get(configstore.KeyRedditCookie) == "" {
+				return ""
+			}
+			return state["reddit_cookie_expired_at"]
+		}(),
+		"performerCount": performerCount,
+		"postCount":      postCount,
 	})
 }
+
+// Largest acceptable POST /config body. Every field is a URL, a key or
+// a cookie.
+const maxConfigBody = 256 << 10
 
 // ── /config ──────────────────────────────────────────────────────────
 //
@@ -518,6 +549,13 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked; set BINGE_ALLOWED_ORIGIN to your Stash origin"})
 		return
 	}
+	// Cap the body. On a daemon nobody has claimed yet this handler is
+	// reachable without a credential, and an uncapped decode turned a
+	// single 300 MB POST into 1.5 GB resident, which in a
+	// memory-limited container is an OOM kill from an unauthenticated
+	// caller. Config is a handful of short strings; a quarter of a
+	// megabyte is already generous.
+	r.Body = http.MaxBytesReader(w, r.Body, maxConfigBody)
 	var req configPostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
@@ -629,12 +667,29 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 
 	// All present fields validated — persist.
 	if req.StashURL != nil {
+		if *req.StashURL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "stashUrl cannot be cleared. Send the address of your Stash instead",
+			})
+			return
+		}
 		if err := s.store.Set(configstore.KeyStashURL, strings.TrimRight(*req.StashURL, "/")); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return
 		}
 	}
 	if req.StashAPIKey != nil {
+		// Emptying the key is not a setting, it is a downgrade: the
+		// daemon drops back to first-run, where anyone on the local
+		// network can rewrite its config and claim it. Nothing in the
+		// UI does this, and a field posted blank by accident should not
+		// be able to either.
+		if *req.StashAPIKey == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "stashApiKey cannot be cleared, because the daemon would fall back to accepting anyone on your network. Send a working key instead",
+			})
+			return
+		}
 		if err := s.store.Set(configstore.KeyStashAPIKey, *req.StashAPIKey); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return

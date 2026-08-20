@@ -72,12 +72,20 @@ func stashURLAllowed(raw string) bool { return stashURLProblem(raw) == "" }
 // and being told that http://localhost:9999/graphql is not a local
 // address sends them to look at their network instead of their URL.
 func stashURLProblem(raw string) string {
+	const needsScheme = "stashUrl needs a scheme, for example http://localhost:9999"
 	u, err := url.Parse(raw)
 	if err != nil {
+		// url.Parse rejects "192.168.1.5:9999" outright, reading the
+		// leading digits as a scheme, so the numeric hosts most people
+		// type got the least useful message of the three. If it parses
+		// once a scheme is added, a scheme is what it was missing.
+		if _, err2 := url.Parse("http://" + raw); err2 == nil {
+			return needsScheme
+		}
 		return "stashUrl is not a URL"
 	}
 	if u.Scheme == "" {
-		return "stashUrl needs a scheme, for example http://localhost:9999"
+		return needsScheme
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "stashUrl must start with http:// or https://"
