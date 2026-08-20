@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -161,23 +163,69 @@ func (p *Poller) Run(ctx context.Context) {
 
 // ── Performer sync ────────────────────────────────────────────────────
 
+// Reddit URLs are recognised by parsing them, not by matching the
+// string.
+//
+// A pattern anchored with (?:^|[./]) - the shape used elsewhere in this
+// project - still accepts a path separator, so
+// https://elsewhere.example/reddit.com/user/victim matched and the
+// daemon polled a stranger's account on that performer's behalf. The
+// host is the thing that decides whose account this is, so the host is
+// what gets checked. The path pattern then only has to find the handle
+// within a URL already known to be Reddit's.
 var (
-	reRedditUser = regexp.MustCompile(`(?i)reddit\.com/(?:user|u)/([^/?#\s]+)`)
-	reRedditSub  = regexp.MustCompile(`(?i)reddit\.com/r/([^/?#\s]+)`)
+	reRedditUserPath = regexp.MustCompile(`(?i)^/(?:user|u)/([^/?#\s]+)`)
+	reRedditSubPath  = regexp.MustCompile(`(?i)^/r/([^/?#\s]+)`)
 )
 
-// parseRedditHandle returns (handle, kind, ok). Prefers `user` over
-// `sub` when both are present, per plan.
+// isRedditHost reports whether a host is reddit.com or a subdomain of
+// it. Exact-or-dotted, so notreddit.com does not qualify.
+func isRedditHost(host string) bool {
+	host = strings.ToLower(host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(host, ".")
+	return host == "reddit.com" || strings.HasSuffix(host, ".reddit.com")
+}
+
+// redditPathHandle extracts a handle from one URL, or "" if the URL is
+// not a Reddit profile or subreddit.
+func redditPathHandle(raw string, path *regexp.Regexp) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		return ""
+	}
+	// A performer's urls[] is typed by hand, so a bare "reddit.com/u/x"
+	// with no scheme is ordinary. url.Parse reads that as a path with
+	// no host, which would fail the host check for the wrong reason.
+	if u.Host == "" && !strings.HasPrefix(raw, "/") {
+		if u2, err2 := url.Parse("https://" + raw); err2 == nil {
+			u = u2
+		}
+	}
+	if !isRedditHost(u.Hostname()) {
+		return ""
+	}
+	m := path.FindStringSubmatch(u.EscapedPath())
+	if len(m) != 2 {
+		return ""
+	}
+	return strings.TrimSuffix(m[1], "/")
+}
+
 func parseRedditHandle(urls []string) (string, string, bool) {
 	var subHandle string
 	for _, u := range urls {
-		if m := reRedditUser.FindStringSubmatch(u); len(m) == 2 {
-			return strings.TrimSuffix(m[1], "/"), "user", true
+		if h := redditPathHandle(u, reRedditUserPath); h != "" {
+			return h, "user", true
 		}
 		if subHandle == "" {
-			if m := reRedditSub.FindStringSubmatch(u); len(m) == 2 {
-				subHandle = strings.TrimSuffix(m[1], "/")
-			}
+			subHandle = redditPathHandle(u, reRedditSubPath)
 		}
 	}
 	if subHandle != "" {

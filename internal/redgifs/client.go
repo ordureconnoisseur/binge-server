@@ -7,9 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
+
+// Upstream bodies are capped. The error paths in this file were
+// already bounded and the success paths, which run per performer
+// per poll, were not.
+const maxUpstreamBody = 16 << 20
 
 // Client wraps Redgifs' temp-token auth + gif lookup endpoint.
 // One temp token lasts ~24h; we hold it in-process and refresh on 401.
@@ -25,7 +31,26 @@ type Client struct {
 func New(userAgent string) *Client {
 	return &Client{
 		userAgent: userAgent,
-		http:      &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			// Every other client in this project bounds its redirects;
+			// this one had no policy at all, so it would chase up to
+			// ten hops to any host, private addresses included, and
+			// whatever came back was stored as a post's media_url and
+			// served to clients. Go strips the bearer token on a host
+			// change, so the token itself was never at risk, but the
+			// hop was.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				host := strings.ToLower(req.URL.Hostname())
+				if host == "redgifs.com" || strings.HasSuffix(host, ".redgifs.com") {
+					return nil
+				}
+				return fmt.Errorf("redirect to disallowed host %q", host)
+			},
+		},
 	}
 }
 
@@ -125,7 +150,7 @@ func (c *Client) Resolve(ctx context.Context, slug string) (Resolved, error) {
 			} `json:"urls"`
 		} `json:"gif"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBody)).Decode(&body); err != nil {
 		return Resolved{}, fmt.Errorf("redgifs gif decode: %w", err)
 	}
 	return Resolved{

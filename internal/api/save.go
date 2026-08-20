@@ -27,6 +27,10 @@ func (s *Server) saveToStash(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Same cap as /config, and for the same reason: an uncapped decode
+	// turns one large request into hundreds of megabytes resident. A
+	// save request is a handful of short strings.
+	r.Body = http.MaxBytesReader(w, r.Body, maxConfigBody)
 	var req social.SaveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
@@ -41,8 +45,14 @@ func (s *Server) saveToStash(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}
+		// Logged in full, returned in outline. The raw error carried
+		// yt-dlp's stderr, Stash's GraphQL response body, the Stash
+		// host and port, and absolute paths inside the user's library,
+		// none of which is the caller's business even authenticated.
 		s.log.Warn("save to stash failed", "source", req.Source, "performer", req.PerformerStashID, "err", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "could not save this to your library; the daemon log says why",
+		})
 		return
 	}
 	// Mark a saved PornHub video so the feed/stories stop surfacing it

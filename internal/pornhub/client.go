@@ -33,7 +33,9 @@ func New() *Client {
 	return &Client{bin: "yt-dlp", timeout: 90 * time.Second}
 }
 
-var reModel = regexp.MustCompile(`(?i)pornhub\.com/(pornstar|model)/([^/?#]+)`)
+// Host-anchored, as in twitter/client.go: an unanchored match picks the
+// name out of any URL that merely contains the string.
+var reModel = regexp.MustCompile(`(?i)(?:^|[./])pornhub\.com/(pornstar|model)/([^/?#]+)`)
 
 // ModelURLFromURLs returns the canonical <.../videos> page for the first
 // pornhub.com pornstar/model link in a performer's urls[], or "".

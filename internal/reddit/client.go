@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+// Upstream bodies are capped. The error paths in this file were
+// already bounded and the success paths, which run per performer
+// per poll, were not.
+const maxUpstreamBody = 16 << 20
+
 // Client uses Reddit's public `.json` listing endpoints, authenticated
 // via a browser session cookie copied from a logged-in tab. This
 // sidesteps Reddit's developer-app gate (killed for self-service in
@@ -253,7 +258,7 @@ func (c *Client) fetchListing(ctx context.Context, endpoint string) ([]Post, err
 	}
 
 	var l listing
-	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBody)).Decode(&l); err != nil {
 		return nil, fmt.Errorf("listing decode: %w", err)
 	}
 

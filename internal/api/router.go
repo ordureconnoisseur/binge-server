@@ -456,9 +456,25 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		// Kept for older plugin builds that read it. Now means "Stash
 		// credentials are present", which is the thing every pillar
 		// needs and the only one worth gating on.
-		"configured":        stashSet,
-		"pillars":           pillars,
-		"lastPollError":     state["last_poll_error"],
+		"configured": stashSet,
+		"pillars":    pillars,
+		// Flattened. /healthz is exempt from authentication entirely,
+		// including from a public address, and the stored reason is a
+		// raw transport error: it carried the Stash host and port, and
+		// in one observed case the remote service's banner. That is the
+		// same leak that was closed on /config, sitting on the one
+		// route with strictly less protection. Whether polling is
+		// failing is the useful part; which host and why is for the
+		// logs and for an authenticated caller.
+		"lastPollError": func() string {
+			if state["last_poll_error"] == "" {
+				return ""
+			}
+			if s.claimed() && credentialMatches(r, s.store.Get(configstore.KeyStashAPIKey)) {
+				return state["last_poll_error"]
+			}
+			return "the last poll failed; see the daemon log"
+		}(),
 		"lastPerformerSync": state["last_performer_sync"],
 		"lastPoll":          state["last_poll"],
 		// Masked when no cookie is stored, the way GET /config does it:

@@ -260,8 +260,28 @@ func (s *Saver) tagWhenScanned(req SaveRequest, label, token, stashType, stashPa
 }
 
 func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string) error {
-	if _, err := os.Stat(dest); err == nil {
-		return nil // already downloaded
+	// A file being present is not proof that a download finished.
+	//
+	// yt-dlp writes straight to the final name, and its parent context
+	// is the request's four-minute deadline, so a long video is killed
+	// mid-write and leaves a truncated file exactly where a complete
+	// one would be. This check then read that as success on the next
+	// attempt: the scan ran, the video was marked saved, and the
+	// half-file was accepted as the real thing for good. An empty file
+	// is always wrong, and a video that came in under a megabyte is
+	// wrong often enough to be worth re-fetching.
+	if fi, err := os.Stat(dest); err == nil {
+		minSize := int64(1)
+		if req.Kind == "video" {
+			minSize = 1 << 20
+		}
+		if fi.Size() >= minSize {
+			return nil // already downloaded
+		}
+		s.log("replacing an implausibly small existing file", dest)
+		if err := os.Remove(dest); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -396,16 +416,35 @@ func validateMediaURL(source, raw string) error {
 	return fmt.Errorf("media host %q not allowed for source %q", host, source)
 }
 
+// mediaExts is what a saved file is allowed to be called.
+//
+// An allowlist rather than a shape check, because the guesses come from
+// a URL and both sources produce confident nonsense. A PornHub save is
+// requested with the watch page URL, whose path ends ".php", so every
+// PornHub save landed as <viewkey>.php: yt-dlp wrote an mp4, Stash
+// would not index a .php file as a scene, the video was marked saved
+// and so vanished from the feed, and all the user was left with was an
+// orphan in their library. redgifs ".m4s" fails the same way. And the
+// ?format= branch is a query parameter under a remote host's control,
+// unsanitised, concatenated into a filename: it escaped the performer
+// directory, which only the write-root confinement stopped.
+var mediaExts = map[string]bool{
+	"mp4": true, "m4v": true, "webm": true, "mov": true, "mkv": true,
+	"jpg": true, "jpeg": true, "png": true, "gif": true, "webp": true,
+	"avif": true, "heic": true,
+}
+
 // extFromURL guesses the file extension from the media URL (path ext or
-// a ?format= param), falling back by kind.
+// a ?format= param), falling back by kind. Anything not recognisably a
+// media extension falls back rather than being trusted.
 func extFromURL(raw, kind string) string {
-	p := urlPath(raw)
-	if e := strings.TrimPrefix(strings.ToLower(path.Ext(p)), "."); e != "" && len(e) <= 4 {
+	if e := strings.TrimPrefix(strings.ToLower(path.Ext(urlPath(raw))), "."); mediaExts[e] {
 		return e
 	}
 	if u, err := url.Parse(raw); err == nil {
-		if f := u.Query().Get("format"); f != "" {
-			return strings.ToLower(f)
+		f := strings.ToLower(strings.TrimPrefix(u.Query().Get("format"), "."))
+		if mediaExts[f] {
+			return f
 		}
 	}
 	if kind == "video" {
