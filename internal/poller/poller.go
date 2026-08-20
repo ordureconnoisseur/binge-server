@@ -258,6 +258,36 @@ func (p *Poller) upsertPerformersBatch(ctx context.Context, performers []stash.P
 	return tx.Commit()
 }
 
+// safeToPrune reports whether a sync result is trustworthy enough to
+// delete rows against.
+//
+// The keep-set is built only from what Stash returned, and a Stash that
+// answers 200 with an empty performer list is not an error to any code
+// path here. Stash mid-restart, mid-migration, or with changed filter
+// semantics produces exactly that, and reconciling against it deleted
+// every performer, which cascaded to every post: up to ninety days of
+// Reddit history that cannot be re-fetched, because Reddit serves only
+// the last 25 submissions per handle. Nothing warned, and the next
+// healthy cycle quietly re-created the performers with no posts.
+//
+// So a wipe is treated as a failed sync rather than an instruction. A
+// sync that keeps nothing while the table holds rows is refused, and so
+// is one that would remove most of the library: real edits remove a few
+// performers at a time, and a genuine mass deletion can wait for the
+// operator to say so.
+func safeToPrune(keep, existing, removing int) (bool, string) {
+	if existing == 0 {
+		return true, ""
+	}
+	if keep == 0 {
+		return false, "stash returned no linked performers at all"
+	}
+	if removing*2 >= existing {
+		return false, "half or more of the library would be removed"
+	}
+	return true, ""
+}
+
 func (p *Poller) deleteMissingPerformers(ctx context.Context, keep map[int]bool) error {
 	rows, err := p.db.QueryContext(ctx, `SELECT stash_id FROM performers`)
 	if err != nil {
@@ -279,6 +309,16 @@ func (p *Poller) deleteMissingPerformers(ctx context.Context, keep map[int]bool)
 	}
 	if len(toDelete) == 0 {
 		return nil
+	}
+	var existing int
+	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performers`).Scan(&existing)
+	if ok, why := safeToPrune(len(keep), existing, len(toDelete)); !ok {
+		p.log.Error("refusing to prune performers, treating this sync as failed",
+			"reason", why,
+			"linked_in_stash", len(keep),
+			"in_db", existing,
+			"would_remove", len(toDelete))
+		return fmt.Errorf("refusing to prune performers: %s", why)
 	}
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -623,8 +663,20 @@ func (p *Poller) markStatus(ctx context.Context, stashID int, status string) {
 
 func (p *Poller) sweepOldPosts(ctx context.Context) error {
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
+	// The cutoff comes from the clock and the comparison is against
+	// Reddit's own timestamp, so a container with a wrong clock, or one
+	// restored from a snapshot, could put the cutoff past every row and
+	// turn this into DELETE FROM posts. Bounded below so it cannot.
+	if cutoff <= 0 {
+		p.log.Warn("retention cutoff is not sane, skipping sweep", "cutoff", cutoff)
+		return nil
+	}
+	// created_utc > 0 because a post whose timestamp Reddit omitted
+	// stores zero, and zero is older than every cutoff. Those were
+	// deleted within a day of arriving and silently re-fetched on the
+	// next poll, forever.
 	res, err := p.db.ExecContext(ctx,
-		`DELETE FROM posts WHERE created_utc < ?`, cutoff)
+		`DELETE FROM posts WHERE created_utc > 0 AND created_utc < ?`, cutoff)
 	if err != nil {
 		return err
 	}

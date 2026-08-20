@@ -154,6 +154,19 @@ func (p *Poller) deleteMissing(ctx context.Context, keep map[int]bool) error {
 		}
 	}
 	rows.Close()
+	if len(del) > 0 {
+		// Same floor as the reddit poller: a Stash that answers 200
+		// with an empty performer list is not an instruction to empty
+		// the library, and the cascade from these rows takes every
+		// stored video with it.
+		var existing int
+		_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pornhub_performers`).Scan(&existing)
+		if existing > 0 && (len(keep) == 0 || len(del)*2 > existing) {
+			p.log.Error("refusing to prune pornhub performers, treating this sync as failed",
+				"linked_in_stash", len(keep), "in_db", existing, "would_remove", len(del))
+			return fmt.Errorf("refusing to prune pornhub performers")
+		}
+	}
 	for _, id := range del {
 		if _, err := p.db.ExecContext(ctx, `DELETE FROM pornhub_performers WHERE stash_id=?`, id); err != nil {
 			return err
