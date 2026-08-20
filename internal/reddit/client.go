@@ -72,13 +72,29 @@ func (c *Client) SetCookie(cookie string) {
 // import never had this problem because it builds the pair itself,
 // which is why one route worked and the other did not.
 //
-// A reddit_session value is base64url and carries no "=", so its
-// presence is what separates a full header from a bare value. If some
-// future value does contain one it is passed through untouched, which
-// is no worse than the old behaviour.
+// Telling a header from a value by looking for "=" alone was too
+// crude: a value that happened to carry one, such as base64 with
+// padding, was passed through and stayed broken. What actually marks a
+// header is a named reddit_session, or several pairs separated by
+// semicolons. Anything else is treated as the value it was asked for.
 func NormalizeCookie(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" || strings.Contains(s, "=") {
+	s := strings.Trim(strings.TrimSpace(raw), "; ")
+	if s == "" {
+		return ""
+	}
+	// Already names the cookie we need, alone or among others.
+	if strings.Contains(s, "reddit_session=") {
+		return s
+	}
+	// A jar of other cookies, pasted whole. It carries no session, so
+	// the probe will refuse it; wrapping it would only disguise that as
+	// a session named after somebody else's cookie.
+	if strings.Contains(s, ";") && strings.Contains(s, "=") {
+		return s
+	}
+	// The Name column copied instead of the Value one. Left alone so it
+	// fails the probe as the mistake it is.
+	if s == "reddit_session" {
 		return s
 	}
 	return "reddit_session=" + s

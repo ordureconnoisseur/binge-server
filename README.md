@@ -126,15 +126,20 @@ Credentials, all set from binge → Settings → "binge-server configuration":
 
    Cookies expire every few months. When that happens the daemon notices on its next poll and the settings card says so, with the date stories stopped updating — paste a fresh cookie to clear it.
 
+3. **X cookies** (`auth_token` + `ct0`) — only for the X pillar, and only together: `auth_token` is useless without `ct0`. Same rotation caveat as Reddit.
+
 ### If Reddit answers 403
 
-Reddit refuses anonymous requests to its `.json` endpoints outright, so a 403 means the daemon's requests are not being recognised as signed in. Two causes, and the settings card distinguishes them for you:
+Reddit refuses anonymous requests to its `.json` endpoints outright, so a 403 means the daemon is not being recognised as signed in. Causes, in the order they are worth checking:
 
-- **The cookie is not reaching Reddit.** Up to v0.3.2 a value pasted by hand was sent exactly as typed, and a `Cookie` header has to be `name=value`, so a bare value arrived as nothing at all and every request came back 403. The cookies.txt import was unaffected, which is why one route worked and the other did not. Fixed in v0.4.0: the value is named for you, and an already-saved one is repaired on the next poll, so upgrading is enough.
-- **Reddit is refusing the address.** Hosted servers and some VPN exits are blocked wholesale, whatever cookie you send. The settings card says so in its own words, because a new cookie cannot fix it. Run the daemon from your home connection or try a different exit.
+- **The session has aged out.** By far the commonest, and the settings card says so with the date stories stopped. Import a fresh cookies.txt or paste a new value.
+- **Reddit is refusing the address.** Hosted servers and some VPN exits are blocked whatever cookie you send. A 403 alone cannot be told apart from an expired session, so the card names this as the fallback rather than guessing.
+- **The cookie never reached Reddit as a cookie.** Up to v0.3.2 a value seeded through `REDDIT_SESSION_COOKIE` was stored exactly as given, and a `Cookie` header has to be `name=value`, so a bare value arrived as nothing at all. Values pasted into the settings page were always probed first and so could not be saved in that state. Fixed in v0.4.0: the value is named for you, and an already-saved one is repaired on the next poll.
 
-Older versions also retired each performer as they failed, and nothing ever un-retired them, so stories stayed empty even after the cookie was fixed. From v0.4.0 a handle is only retired when Reddit is answering other handles at the same moment, and saving a cookie gives every retired handle another chance.
-3. **X cookies** (`auth_token` + `ct0`) — only for the X pillar, and only together: `auth_token` is useless without `ct0`. Same rotation caveat as Reddit.
+Two related changes in v0.4.0 are worth knowing about if you ran an earlier build:
+
+- A 403 used to retire that performer, and nothing ever un-retired one, so a refusal aimed at the daemon rather than the handle worked through the whole library one cycle at a time. A handle is now only retired when Reddit is answering others at the same moment, and every already-retired handle is given one more chance the first time v0.4.0 starts.
+- Setup used to validate the cookie against a different endpoint, with a different User-Agent, than the poller uses. Reddit answers those differently, so a cookie could pass setup and then fail on every poll. The probe now checks a listing too, as the poller itself.
 
 PornHub needs no credentials. Save additionally needs a write path — see `BINGE_SOCIAL_WRITE_ROOT` below.
 
@@ -183,7 +188,7 @@ The full re-scan happens every 24 hours by default. Add a Reddit URL to a perfor
 
 | Method | Path | Description |
 |-|-|-|
-| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, redditCookieExpiredAt, redditBlockedAt, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
+| GET | `/healthz` | `{ ok, version, configured, lastPerformerSync, lastPoll, redditCookieExpiredAt, performerCount, postCount }`. Unauthenticated, and what the container healthcheck polls — `version` tells you which build is actually running |
 | GET | `/config` | Public shape of stored config — booleans for which secrets are set, never the values |
 | POST | `/config` | Body: `{stashUrl?, stashApiKey?, redditSessionCookie?}`. Validates each non-empty field against the live service before persisting |
 | GET | `/reddit/stories?sinceUtc=N` | Per-performer digest, used by binge's stories row |

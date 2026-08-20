@@ -32,6 +32,26 @@ func TestNormalizeCookie(t *testing.T) {
 			want: "reddit_session=abc; csv=1; edgebucket=xyz",
 		},
 		{
+			name: "a value carrying an equals sign is still a value",
+			in:   "abc123==",
+			want: "reddit_session=abc123==",
+		},
+		{
+			name: "a jar with no session is left for the probe to refuse",
+			in:   "csv=1; edgebucket=xyz",
+			want: "csv=1; edgebucket=xyz",
+		},
+		{
+			name: "a stray leading separator is dropped",
+			in:   "; reddit_session=abc",
+			want: "reddit_session=abc",
+		},
+		{
+			name: "the Name column copied by mistake is not made to look real",
+			in:   "reddit_session",
+			want: "reddit_session",
+		},
+		{
 			name: "empty stays empty, so it still reads as not set up",
 			in:   "",
 			want: "",

@@ -107,7 +107,7 @@ func main() {
 		cfg.performerSyncInterval, cfg.pollInterval,
 	)
 
-	server := api.New(database, store, pollerSvc, stashClient, twitterClient, saverSvc, pornhubClient, log.With("component", "api"), cfg.allowedOrigin)
+	server := api.New(database, store, pollerSvc, stashClient, twitterClient, saverSvc, pornhubClient, log.With("component", "api"), cfg.allowedOrigin, cfg.redditUserAgent)
 	server.SetVersion(Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

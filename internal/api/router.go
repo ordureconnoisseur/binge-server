@@ -57,13 +57,19 @@ type Server struct {
 	phOwned    *phOwnedCache
 
 	allowedOrigins []string // CORS allowlist (parsed); loopback always OK
+
+	// The User-Agent the poller sends. The cookie probe has to send the
+	// same one: Reddit's answer depends on who is asking, so validating
+	// with a different identity can accept a cookie that then fails on
+	// every poll.
+	redditUserAgent string
 }
 
 // refreshCooldown — minimum time between /reddit/refresh-triggered
 // polls. Manual hammering won't translate to bursts on Reddit.
 const refreshCooldown = 30 * time.Second
 
-func New(db *sql.DB, store *configstore.Store, poller Poller, stashClient *stash.Client, twitterClient *twitter.Client, saver *social.Saver, pornhubClient *pornhub.Client, log *slog.Logger, allowedOrigin string) *Server {
+func New(db *sql.DB, store *configstore.Store, poller Poller, stashClient *stash.Client, twitterClient *twitter.Client, saver *social.Saver, pornhubClient *pornhub.Client, log *slog.Logger, allowedOrigin, redditUserAgent string) *Server {
 	return &Server{
 		db:             db,
 		store:          store,
@@ -78,6 +84,9 @@ func New(db *sql.DB, store *configstore.Store, poller Poller, stashClient *stash
 		phPreviews:     newPHPreviewCache(),
 		phOwned:        newPHOwnedCache(),
 		allowedOrigins: parseOrigins(allowedOrigin),
+		// Empty in tests, where the probe is never expected to agree
+		// with a poller that does not exist.
+		redditUserAgent: redditUserAgent,
 	}
 }
 
@@ -301,7 +310,6 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		"lastPerformerSync":     state["last_performer_sync"],
 		"lastPoll":              state["last_poll"],
 		"redditCookieExpiredAt": state["reddit_cookie_expired_at"],
-		"redditBlockedAt":       state["reddit_blocked_at"],
 		"performerCount":        performerCount,
 		"postCount":             postCount,
 	})
@@ -328,11 +336,6 @@ type configGetResponse struct {
 	// no visible symptom other than stories quietly stopping, so the UI
 	// needs to be told rather than the user having to guess.
 	RedditCookieExpiredAt string `json:"redditCookieExpiredAt,omitempty"`
-	// RFC3339 time the poller first found Reddit refusing every request
-	// it made, empty otherwise. Distinct from an expired cookie: this one
-	// is usually about the address the daemon calls from, so a fresh
-	// cookie will not fix it and the UI should not suggest one.
-	RedditBlockedAt string `json:"redditBlockedAt,omitempty"`
 	// Social "save to Stash" library roots (not secret). Configured =
 	// both set.
 	SocialWriteRoot      string `json:"socialWriteRoot"`
@@ -368,12 +371,6 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 				return ""
 			}
 			return s.syncState(r.Context(), "reddit_cookie_expired_at")
-		}(),
-		RedditBlockedAt: func() string {
-			if s.store.Get(configstore.KeyRedditCookie) == "" {
-				return ""
-			}
-			return s.syncState(r.Context(), "reddit_blocked_at")
 		}(),
 	})
 }
@@ -467,7 +464,7 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.RedditSessionCookie != nil && *req.RedditSessionCookie != "" {
-		if err := probeRedditCookie(r.Context(), *req.RedditSessionCookie); err != nil {
+		if err := probeRedditCookie(r.Context(), *req.RedditSessionCookie, s.redditUserAgent); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reddit cookie rejected: " + err.Error()})
 			return
 		}
@@ -486,7 +483,7 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.RedditSessionCookie != nil {
+	if req.RedditSessionCookie != nil && *req.RedditSessionCookie != "" {
 		if err := s.store.Set(configstore.KeyRedditCookie, reddit.NormalizeCookie(*req.RedditSessionCookie)); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return
@@ -496,8 +493,6 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		// stare at a stale warning until the next poll tick, up to 4h away.
 		_, _ = s.db.ExecContext(r.Context(),
 			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
-		_, _ = s.db.ExecContext(r.Context(),
-			`DELETE FROM sync_state WHERE key='reddit_blocked_at'`)
 		// Give every retired handle another chance. A run of refusals
 		// from Reddit retires performers one at a time and nothing else
 		// in the daemon ever un-retires them, so without this a user who
@@ -507,6 +502,13 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		// the question every one of those refusals was really about.
 		_, _ = s.db.ExecContext(r.Context(),
 			`UPDATE performers SET handle_status='ok' WHERE handle_status != 'ok'`)
+		// Tells a poll cycle already under way that its verdicts were
+		// reached under credentials nobody is using now, so it does not
+		// write them back over the handles just revived.
+		_, _ = s.db.ExecContext(r.Context(),
+			`INSERT INTO sync_state(key,value) VALUES('config_generation', ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			time.Now().UTC().Format(time.RFC3339Nano))
 	}
 	// X cookies — both must be provided together (auth_token is useless
 	// without the matching ct0 csrf token). Persisted then pushed into the
@@ -603,38 +605,69 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 // at all. It is deliberately not a plausible key, and is never stored.
 const bogusProbeKey = "binge-server-negative-control-not-a-real-key"
 
-// probeRedditCookie does a tiny request to oauth.reddit.com's /api/v1/me
-// — fast, low-cost, and returns 200 only for a valid session.
-func probeRedditCookie(ctx context.Context, cookie string) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.reddit.com/api/me.json", nil)
-	if err != nil {
-		return err
+// probeRedditCookie checks that a cookie will work for the thing the
+// daemon actually does with it, which is two separate questions.
+//
+// The first is whether Reddit knows who we are. /api/v1/me answers "{}"
+// to an anonymous caller, which is what a cookie that never made it
+// into a valid header looks like.
+//
+// The second is whether the listing endpoints will answer us at all.
+// They are edge-blocked far more aggressively than the identity route,
+// so checking only the first accepts a cookie that then fails on every
+// poll, and the daemon looks configured while nothing arrives. That is
+// the shape of the bug this was changed to catch. Both requests carry
+// the poller's User-Agent for the same reason: Reddit's answer depends
+// on who is asking.
+func probeRedditCookie(ctx context.Context, cookie, userAgent string) error {
+	if userAgent == "" {
+		userAgent = "binge-server (config validator)"
 	}
-	// Same normalisation the poller applies, or a pasted bare value
-	// would be rejected here for being anonymous even though it is the
-	// exact thing the settings page asks for.
-	req.Header.Set("Cookie", reddit.NormalizeCookie(cookie))
-	req.Header.Set("User-Agent", "binge-server/0.2 (config validator)")
+	// Whatever the settings page was given, send what the poller sends.
+	header := reddit.NormalizeCookie(cookie)
 	client := &http.Client{
 		Timeout: 8 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	resp, err := client.Do(req)
+
+	get := func(url string) (int, []byte, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Cookie", header)
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
+		return resp.StatusCode, raw, nil
+	}
+
+	code, raw, err := get("https://www.reddit.com/api/me.json")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("reddit returned %d", resp.StatusCode)
-	}
-	// The /api/me.json endpoint returns "{}" for anonymous sessions
-	// (no cookie / expired cookie) and the user's account JSON when
-	// authenticated. We treat empty `{}` as "not authenticated."
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("{}")) {
+	switch {
+	case code == 200 && bytes.Equal(bytes.TrimSpace(raw), []byte("{}")):
 		return errors.New("session returned anonymous response")
+	case code == 403:
+		return errors.New("reddit refused the request (403). If this cookie works in your browser, reddit is refusing the address binge-server connects from, which hosted servers and some VPN exits hit")
+	case code != 200:
+		return fmt.Errorf("reddit returned %d", code)
+	}
+
+	// Same family of URL the poller fetches per performer.
+	code, _, err = get("https://www.reddit.com/r/all/new.json?limit=1&raw_json=1")
+	if err != nil {
+		return err
+	}
+	if code != 200 {
+		return fmt.Errorf("reddit accepted the cookie but answered %d to a listing, which is what the poller fetches, so stories would not arrive", code)
 	}
 	return nil
 }

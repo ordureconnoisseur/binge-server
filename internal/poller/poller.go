@@ -98,6 +98,8 @@ func (p *Poller) Run(ctx context.Context) {
 	// Initial pass: only proceed if config is present. A freshly-
 	// installed daemon with no env vars will skip both passes and rely
 	// on the first /config POST to wake things up via /reddit/refresh.
+	p.reviveRetiredOnce(ctx)
+
 	if p.applyConfig() {
 		if err := p.SyncPerformers(ctx); err != nil {
 			p.log.Error("initial performer sync failed", "err", err)
@@ -319,6 +321,12 @@ func (p *Poller) PollAll(ctx context.Context) error {
 	succeeded := 0
 	forbidden := 0
 	var pending []statusMark
+	// Verdicts are written at the end of the cycle now, which can take
+	// minutes on a large library. If the config changed in the meantime,
+	// they were reached under credentials nobody is using any more, and
+	// writing them would quietly undo the revive that a cookie save just
+	// performed.
+	gen := p.configGeneration(ctx)
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -342,6 +350,13 @@ func (p *Poller) PollAll(ctx context.Context) error {
 				forbidden++
 			}
 			p.log.Warn("poll performer failed", "stash_id", t.StashID, "handle", t.Handle, "err", err)
+			// Paced like a success. Failures used to skip this, which
+			// only stayed harmless while a refused handle was retired
+			// after one cycle: now that nothing is retired for being
+			// refused, an unpaced run would fire every request in the
+			// library back to back, on every tick, forever. That is the
+			// behaviour most likely to keep an address refused.
+			time.Sleep(perRequestSleep)
 			continue
 		}
 		succeeded++
@@ -358,17 +373,41 @@ func (p *Poller) PollAll(ctx context.Context) error {
 	// in the daemon ever sets a handle back to ok, so that damage
 	// outlives its cause. Fixing the cookie afterwards would not bring a
 	// single story back.
-	if succeeded > 0 {
-		for _, m := range pending {
-			p.markStatus(ctx, m.stashID, m.status)
+	// Reddit answering 403 to everything says nothing about any one
+	// handle. It is what a dead cookie looks like, since an anonymous
+	// caller is refused outright, and equally what an address Reddit
+	// will not serve looks like. Either way it is about the caller, and
+	// writing it onto each performer in turn retires the whole library
+	// one tick at a time. Nothing else in the daemon sets a handle back
+	// to ok, so that damage outlives its cause.
+	//
+	// Only 403 is ambiguous. A 404 or a suspension is a verdict on that
+	// handle whatever else is going on, and holding those back would
+	// leave a library of dead handles being re-polled forever with
+	// nothing said about it.
+	blanketRefusal := succeeded == 0 && forbidden > 0
+	if p.configGeneration(ctx) != gen {
+		p.log.Info("config changed mid-cycle, discarding this cycle's verdicts",
+			"held_back", len(pending))
+		pending = nil
+	}
+	for _, m := range pending {
+		if m.status == "unavailable" && blanketRefusal {
+			continue
 		}
-	} else if forbidden > 0 {
-		p.log.Error("reddit refused every request this cycle, so no handles were retired",
+		p.markStatus(ctx, m.stashID, m.status)
+	}
+	if blanketRefusal {
+		p.log.Error("reddit refused every request this cycle, so no handles were retired for it",
 			"performers", len(targets))
 	}
 
-	p.setCookieExpired(ctx, expired, succeeded > 0)
-	p.setRedditBlocked(ctx, succeeded == 0 && forbidden > 0, succeeded > 0)
+	// A blanket refusal is reported as an expired cookie because that is
+	// the likely cause and the only one the user can act on. Telling
+	// them instead that it is probably their address, which was the
+	// first shape of this, steers them away from the fix that works in
+	// the common case; the banner names the address as the fallback.
+	p.setCookieExpired(ctx, expired || blanketRefusal, succeeded > 0)
 
 	_, _ = p.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('last_poll', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, time.Now().UTC().Format(time.RFC3339))
@@ -392,21 +431,51 @@ func (p *Poller) setCookieExpired(ctx context.Context, expired, sawSuccess bool)
 	}
 }
 
-// setRedditBlocked records or clears the "reddit is refusing this
-// daemon outright" marker. Separate from the expired-cookie marker
-// because the remedy is different: an expired session asks for a new
-// cookie, whereas a blanket refusal is usually about where the daemon
-// is calling from, and pasting a fresh cookie will not touch it.
-func (p *Poller) setRedditBlocked(ctx context.Context, blocked, sawSuccess bool) {
-	if blocked {
-		// First sighting wins, so the UI can say when it started.
-		_, _ = p.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_state(key,value)
-			VALUES('reddit_blocked_at', ?)`, time.Now().UTC().Format(time.RFC3339))
+// configGeneration is bumped whenever credentials change. Compared
+// across a poll cycle it says whether the answers gathered during it
+// still describe the daemon as it is now.
+func (p *Poller) configGeneration(ctx context.Context) string {
+	var v string
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key='config_generation'`).Scan(&v)
+	return v
+}
+
+// reviveRetiredOnce gives every retired handle one more chance, the
+// first time a build carrying this runs.
+//
+// Older builds retired a performer on any 403, including the ones aimed
+// at the caller rather than the handle, and nothing ever set one back.
+// A library could therefore be whittled down to nothing over weeks, and
+// the only outward sign was stories thinning out. Those installs cannot
+// fix themselves: with every handle retired there is nobody left to
+// poll, so no cycle can succeed, so nothing clears. Saving a cookie
+// does it too, but only someone who suspects the cookie would think to,
+// and for most people the cookie is fine.
+//
+// Once, not on every start: a handle that is genuinely gone should be
+// allowed to stay gone after the next cycle retires it again.
+func (p *Poller) reviveRetiredOnce(ctx context.Context) {
+	const marker = "handles_revived_after_403_fix"
+	var seen string
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT value FROM sync_state WHERE key=?`, marker).Scan(&seen)
+	if seen != "" {
 		return
 	}
-	if sawSuccess {
-		_, _ = p.db.ExecContext(ctx, `DELETE FROM sync_state WHERE key='reddit_blocked_at'`)
+	res, err := p.db.ExecContext(ctx,
+		`UPDATE performers SET handle_status='ok' WHERE handle_status != 'ok'`)
+	if err != nil {
+		p.log.Warn("could not revive retired handles", "err", err)
+		return
 	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		p.log.Info("gave retired reddit handles another chance", "handles", n)
+	}
+	_, _ = p.db.ExecContext(ctx,
+		`INSERT INTO sync_state(key,value) VALUES(?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		marker, time.Now().UTC().Format(time.RFC3339))
 }
 
 // statusMark is a verdict on one handle, held back until the end of the
