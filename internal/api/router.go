@@ -126,6 +126,12 @@ func (s *Server) clearPollError() {
 	_, _ = s.db.Exec(`DELETE FROM sync_state WHERE key='last_poll_error'`)
 }
 
+// claimed reports whether a Stash API key has been stored, which is
+// what turns on authentication for every route but /healthz.
+func (s *Server) claimed() bool {
+	return s.store.Get(configstore.KeyStashAPIKey) != ""
+}
+
 // logWarn is log.Warn that tolerates a Server built without a logger.
 func (s *Server) logWarn(msg string, args ...any) {
 	if s.log == nil {
@@ -621,7 +627,12 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 			// for someone already on the network and holding a key;
 			// an unauthenticated port scanner otherwise.
 			detail := err.Error()
-			if firstRunPublicClaim {
+			// The raw dial result tells a caller whether a host and
+			// port are open, which turns this handler into a port
+			// scanner for anyone who can reach it. On an unclaimed
+			// daemon that is anyone on the network, since no credential
+			// is required yet.
+			if firstRunPublicClaim || !s.claimed() {
 				// Reaching Stash and being refused is not a secret from
 				// someone who already reached this daemon, and calling
 				// it a network problem sent people with a mistyped key
@@ -639,18 +650,6 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// An empty string is a request to forget the cookie, not a no-op.
-	// The pointer type exists precisely to tell absent from empty, and
-	// answering ok to someone clearing a stale value while keeping it
-	// is the worst of both.
-	if req.RedditSessionCookie != nil && *req.RedditSessionCookie == "" {
-		if err := s.store.Set(configstore.KeyRedditCookie, ""); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
-			return
-		}
-		_, _ = s.db.ExecContext(r.Context(),
-			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
-	}
 	if req.RedditSessionCookie != nil && *req.RedditSessionCookie != "" {
 		// Cheap and specific first. Reddit answers 403 to anything it
 		// does not recognise, so without this a typo and a blocked
@@ -694,6 +693,23 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return
 		}
+	}
+	// An empty string is a request to forget the cookie, not a no-op.
+	// The pointer type exists precisely to tell absent from empty, and
+	// answering ok while keeping the old value is the worst of both.
+	//
+	// Down here with the other writes, not up with the checks. Clearing
+	// it early meant a request that was then rejected for an unrelated
+	// field had still emptied the cookie, so a caller got a 400 and a
+	// broken Reddit pillar at the same time. This handler promises that
+	// a rejected request changes nothing.
+	if req.RedditSessionCookie != nil && *req.RedditSessionCookie == "" {
+		if err := s.store.Set(configstore.KeyRedditCookie, ""); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
+			return
+		}
+		_, _ = s.db.ExecContext(r.Context(),
+			`DELETE FROM sync_state WHERE key='reddit_cookie_expired_at'`)
 	}
 	if req.RedditSessionCookie != nil && *req.RedditSessionCookie != "" {
 		if err := s.store.Set(configstore.KeyRedditCookie, reddit.NormalizeCookie(*req.RedditSessionCookie)); err != nil {

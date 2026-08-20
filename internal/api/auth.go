@@ -139,13 +139,23 @@ func (s *Server) allowKeyRotation(r *http.Request) bool {
 	// Two requests to Stash per attempt, triggerable by anyone on the
 	// local network who can present a wrong key. Cheap to allow now and
 	// then, not worth allowing in a loop.
+	//
+	// The window is only pushed forward by attempts that actually cost
+	// something. Stamping it on every call let a caller posting a wrong
+	// key twice a second hold the window permanently shut, which locked
+	// out the operator this escape exists for: a denial of service on
+	// the recovery path, built into the rate limit meant to protect it.
 	s.rotateMu.Lock()
 	if time.Since(s.lastRotateTry) < 2*time.Second {
 		s.rotateMu.Unlock()
 		return false
 	}
-	s.lastRotateTry = time.Now()
 	s.rotateMu.Unlock()
+	defer func() {
+		s.rotateMu.Lock()
+		s.lastRotateTry = time.Now()
+		s.rotateMu.Unlock()
+	}()
 	stashURL := s.store.Get(configstore.KeyStashURL)
 	if stashURL == "" {
 		return false

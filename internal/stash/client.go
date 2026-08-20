@@ -23,7 +23,22 @@ func New(baseURL, apiKey string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
-		http:    &http.Client{Timeout: 60 * time.Second},
+		http: &http.Client{
+			Timeout: 60 * time.Second,
+			// Do not follow redirects, for the same reason the config
+			// probe does not. Go strips Authorization and Cookie when a
+			// redirect crosses hosts, but it copies a custom header
+			// like ApiKey to wherever it is sent. This client carries
+			// the Stash API key on every poll, sync and save, so one
+			// 3xx from the configured Stash host was enough to hand
+			// that key to any host on the internet, which is exactly
+			// what restricting the Stash URL to private addresses is
+			// meant to prevent. The probe was hardened against this and
+			// the client that actually holds the key was not.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 

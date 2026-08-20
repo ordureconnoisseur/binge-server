@@ -332,14 +332,24 @@ var phThumbHTTP = &http.Client{
 	CheckRedirect: allowedHostSuffixes("phncdn.com", "pornhub.com"),
 }
 
+// isPHCDNHost is the host rule both PornHub media routes use. Exact
+// match or a dotted suffix; a bare suffix would accept any registrable
+// domain ending in the same letters.
+func isPHCDNHost(host string) bool {
+	return host == "phncdn.com" || strings.HasSuffix(host, ".phncdn.com")
+}
+
 func (s *Server) pornhubThumb(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("url")
 	u, err := url.Parse(raw)
-	// Leading dot matters: without it "myevilphncdn.com" — a
-	// registrable domain — satisfies the suffix check.
+	if err != nil || u == nil {
+		http.Error(w, "bad url", http.StatusBadRequest)
+		return
+	}
+	// Leading dot matters: without it "myevilphncdn.com", a
+	// registrable domain, satisfies the suffix check.
 	host := strings.ToLower(u.Hostname())
-	if err != nil || u.Scheme != "https" ||
-		!(host == "phncdn.com" || strings.HasSuffix(host, ".phncdn.com")) {
+	if u.Scheme != "https" || !isPHCDNHost(host) {
 		http.Error(w, "host not allowed", http.StatusForbidden)
 		return
 	}
@@ -395,7 +405,11 @@ func (s *Server) pornhubPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no preview", http.StatusNotFound)
 		return
 	}
-	if u, err := url.Parse(previewURL); err != nil || !strings.HasSuffix(strings.ToLower(u.Host), "phncdn.com") {
+	// Same rule as the thumbnail route: exact host or a dotted suffix,
+	// or "evilphncdn.com" passes. Scheme checked too, so a scraped
+	// attribute cannot downgrade this to plaintext.
+	if u, perr := url.Parse(previewURL); perr != nil || u == nil || u.Scheme != "https" ||
+		!isPHCDNHost(strings.ToLower(u.Hostname())) {
 		http.Error(w, "bad preview url", http.StatusBadGateway)
 		return
 	}

@@ -59,7 +59,23 @@ type Saver struct {
 }
 
 func New(st *stash.Client, ph *pornhub.Client, logger *slog.Logger) *Saver {
-	return &Saver{stash: st, pornhub: ph, http: &http.Client{Timeout: 180 * time.Second}, logger: logger}
+	return &Saver{
+		stash:   st,
+		pornhub: ph,
+		http: &http.Client{
+			Timeout: 180 * time.Second,
+			// Every hop is re-checked, not just the first. Validating
+			// only the URL handed in left an open redirect on any
+			// allowed host (out.reddit.com, x.com/i/redirect) as a way
+			// to walk the fetch onto the LAN: the response body is then
+			// written into the library and scanned into Stash, so the
+			// caller reads it back. Every sibling proxy in this project
+			// already guards its redirects; this client and the Stash
+			// one were the two that did not.
+			CheckRedirect: checkMediaRedirect,
+		},
+		logger: logger,
+	}
 }
 
 func (s *Saver) log(msg, detail string) {
@@ -267,7 +283,12 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 		}
 		return s.pornhub.Download(ctx, req.MediaURL, dest)
 	}
-	hr, err := http.NewRequestWithContext(ctx, "GET", req.MediaURL, nil)
+	// The source travels with the request so every redirect can be
+	// checked against the same host list the original URL was.
+	hr, err := http.NewRequestWithContext(
+		context.WithValue(ctx, mediaSourceKey, req.Source),
+		"GET", req.MediaURL, nil,
+	)
 	if err != nil {
 		return err
 	}
@@ -312,6 +333,25 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 // maxSaveBytes caps a single non-video Save download. Images and short
 // clips sit far under this; it exists only to stop an unbounded write.
 const maxSaveBytes = 512 << 20 // 512 MiB
+
+// checkMediaRedirect keeps a media download inside the host set of the
+// source it started from. The source is carried on the request context
+// because http.Client gives the hook no other way to know it.
+func checkMediaRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("too many redirects")
+	}
+	source, _ := req.Context().Value(mediaSourceKey).(string)
+	if source == "" {
+		return fmt.Errorf("redirect with no source to check against")
+	}
+	return validateMediaURL(source, req.URL.String())
+}
+
+type mediaSourceCtxKey struct{}
+
+// mediaSourceKey carries the save source through to the redirect hook.
+var mediaSourceKey = mediaSourceCtxKey{}
 
 // mediaHosts lists the hostnames each source is allowed to fetch from.
 // A save request naming a source may only pull media from that source's
