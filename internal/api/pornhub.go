@@ -297,6 +297,22 @@ func (s *Server) pornhubStream(w http.ResponseWriter, r *http.Request) {
 		s.phStreams.put(vid, u)
 	}
 
+	// Same rule as the thumbnail and preview routes beside it.
+	//
+	// This route had none, and it was the only one that did not. The
+	// allowlist on phStreamHTTP is a CheckRedirect, so it is consulted
+	// on the second hop and never sees the URL we start with. That URL
+	// is whatever yt-dlp printed for a watch page, checked only for an
+	// "http" prefix, so a page whose extraction returned something else
+	// made the daemon fetch it from inside the user's network - and its
+	// Mullvad namespace - and relay the body straight back to the
+	// caller. Plaintext http was accepted too.
+	if u, perr := url.Parse(mp4); perr != nil || u == nil ||
+		u.Scheme != "https" ||
+		!isPHCDNHost(strings.ToLower(u.Hostname())) {
+		http.Error(w, "bad stream url", http.StatusBadGateway)
+		return
+	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, mp4, nil)
 	if err != nil {
 		http.Error(w, "build request", http.StatusInternalServerError)
@@ -318,6 +334,7 @@ func (s *Server) pornhubStream(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(h, v)
 		}
 	}
+	setMediaResponseHeaders(w)
 	w.WriteHeader(resp.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = io.Copy(w, resp.Body)
@@ -330,6 +347,16 @@ func (s *Server) pornhubStream(w http.ResponseWriter, r *http.Request) {
 var phThumbHTTP = &http.Client{
 	Timeout:       20 * time.Second,
 	CheckRedirect: allowedHostSuffixes("phncdn.com", "pornhub.com"),
+}
+
+// setMediaResponseHeaders marks a relayed body as not-to-be-sniffed.
+//
+// These routes echo an upstream Content-Type, and the plugin passes the
+// Stash API key to media URLs in the query string, so a document
+// rendered on this origin could read that key straight out of
+// location.search. Nothing is allowed to be treated as a document.
+func setMediaResponseHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
 // isPHCDNHost is the host rule both PornHub media routes use. Exact
@@ -367,6 +394,7 @@ func (s *Server) pornhubThumb(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(h, v)
 		}
 	}
+	setMediaResponseHeaders(w)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
@@ -430,6 +458,7 @@ func (s *Server) pornhubPreview(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(h, v)
 		}
 	}
+	setMediaResponseHeaders(w)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }

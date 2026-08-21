@@ -123,11 +123,19 @@ func isPrivateHost(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate() || isCGNAT(ip)
 	}
-	// Local / tailnet hostnames.
+	// Local hostnames.
+	//
+	// .ts.net is deliberately NOT here. This check is what stops the
+	// stored Stash API key being sent off the local network, and a
+	// Tailscale Funnel name is publicly resolvable, publicly reachable
+	// and free to obtain - so accepting the suffix let anyone name a
+	// host they control as the user's Stash, which both defeats the
+	// first-run claim and sends the real key to them on the next poll.
+	// A Tailscale destination still works: give it as its 100.64.0.0/10
+	// address, which isCGNAT below accepts.
 	if host == "localhost" ||
 		strings.HasSuffix(host, ".local") ||
-		strings.HasSuffix(host, ".internal") ||
-		strings.HasSuffix(host, ".ts.net") {
+		strings.HasSuffix(host, ".internal") {
 		return true
 	}
 	// A bare hostname (no dot) is a LAN/tailnet machine name, not a

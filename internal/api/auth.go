@@ -53,6 +53,31 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		want := s.store.Get(configstore.KeyStashAPIKey)
 		if want == "" {
+			// Nothing stored yet: the only thing on offer is storing
+			// something. Every other route waits.
+			//
+			// This used to depend on the peer address, opening every
+			// route to a private one. But RemoteAddr is the address of
+			// whatever last spoke to us, so anything in front of the
+			// daemon - cloudflared, nginx, traefik, a sidecar on the
+			// compose network, Docker's own userland proxy - puts a
+			// private address there for every caller on the internet.
+			// The premise in the comment below, that a proxy puts a
+			// PUBLIC address in RemoteAddr, is true only of a direct
+			// port-forward. So on a perfectly ordinary deployment an
+			// unclaimed daemon was serving /save, /reddit/refresh, the
+			// media proxies and the feeds to anyone who found the
+			// hostname, with no credential at all.
+			//
+			// Restricting first run to the claim itself costs nothing:
+			// claiming is a POST /config, and /healthz is exempt above
+			// for the installer's "is it up yet" poll.
+			if !(r.Method == http.MethodPost && r.URL.Path == "/config") {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "binge-server has no Stash API key yet. Open binge from your Stash and let it send the key, or seed one with the STASH_API_KEY environment variable.",
+				})
+				return
+			}
 			// Nothing to check against yet: a fresh install, or a Stash
 			// with authentication switched off. Match Stash exactly —
 			// private networks may proceed, public IPs may not. This is
@@ -145,17 +170,27 @@ func (s *Server) allowKeyRotation(r *http.Request) bool {
 	// key twice a second hold the window permanently shut, which locked
 	// out the operator this escape exists for: a denial of service on
 	// the recovery path, built into the rate limit meant to protect it.
+	// Checked and stamped under one lock.
+	//
+	// The stamp used to live in a deferred func that ran after both
+	// Stash probes had finished, up to sixteen seconds later, with the
+	// lock dropped in between. Every request arriving in that gap read
+	// the same stale timestamp and every one of them passed, so the
+	// limit that exists to bound this cost bounded nothing: sixty
+	// concurrent callers produced thirty-nine round trips to the user's
+	// Stash where one was intended.
+	//
+	// Stamping here rather than on every call keeps the property the
+	// old comment was protecting: a caller posting a wrong key twice a
+	// second still cannot hold the window shut, because a rejected
+	// request returns above without stamping.
 	s.rotateMu.Lock()
 	if time.Since(s.lastRotateTry) < 2*time.Second {
 		s.rotateMu.Unlock()
 		return false
 	}
+	s.lastRotateTry = time.Now()
 	s.rotateMu.Unlock()
-	defer func() {
-		s.rotateMu.Lock()
-		s.lastRotateTry = time.Now()
-		s.rotateMu.Unlock()
-	}()
 	stashURL := s.store.Get(configstore.KeyStashURL)
 	if stashURL == "" {
 		return false

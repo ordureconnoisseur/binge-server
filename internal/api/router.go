@@ -754,31 +754,46 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Rejections for an emptied field, up here with the other checks.
+	//
+	// These two used to sit inside the persist section below, each above
+	// its own write but below the one before it. So a request carrying a
+	// new Stash address and a blank API key - which is exactly what a
+	// settings form posts when its key input renders as a masked
+	// placeholder and the user edits only the address - was answered
+	// 400 "stashApiKey cannot be cleared" having ALREADY repointed the
+	// daemon at the new address. The user sees an error and assumes
+	// nothing happened; the daemon is now aimed somewhere else while
+	// still holding the real key, and hands it over on the next poll.
+	//
+	// The X pair a few lines up was hoisted for this exact reason. These
+	// two were left behind.
+	if req.StashURL != nil && *req.StashURL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "stashUrl cannot be cleared. Send the address of your Stash instead",
+		})
+		return
+	}
+	if req.StashAPIKey != nil && *req.StashAPIKey == "" {
+		// Emptying the key is not a setting, it is a downgrade: the
+		// daemon drops back to first-run, where anyone on the local
+		// network can rewrite its config and claim it. Nothing in the
+		// UI does this, and a field posted blank by accident should not
+		// be able to either.
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "stashApiKey cannot be cleared, because the daemon would fall back to accepting anyone on your network. Send a working key instead",
+		})
+		return
+	}
+
 	// All present fields validated — persist.
 	if req.StashURL != nil {
-		if *req.StashURL == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "stashUrl cannot be cleared. Send the address of your Stash instead",
-			})
-			return
-		}
 		if err := s.store.Set(configstore.KeyStashURL, strings.TrimRight(*req.StashURL, "/")); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return
 		}
 	}
 	if req.StashAPIKey != nil {
-		// Emptying the key is not a setting, it is a downgrade: the
-		// daemon drops back to first-run, where anyone on the local
-		// network can rewrite its config and claim it. Nothing in the
-		// UI does this, and a field posted blank by accident should not
-		// be able to either.
-		if *req.StashAPIKey == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "stashApiKey cannot be cleared, because the daemon would fall back to accepting anyone on your network. Send a working key instead",
-			})
-			return
-		}
 		if err := s.store.Set(configstore.KeyStashAPIKey, *req.StashAPIKey); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 			return

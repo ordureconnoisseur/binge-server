@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,12 +47,28 @@ var handleRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 // reXHandle pulls a handle out of a twitter.com / x.com profile URL.
 // Skips reserved path segments that aren't real profiles.
 //
-// The leading (?:^|[./]) is load-bearing: "x.com" is a suffix of plenty of
-// unrelated hosts, and without a host boundary this matched inside them.
-// indexxx.com/m/<name> became @m and pornbox.com/application/model/<id>
-// became @application — 119 of 1087 performers in one real library, most
-// of which then fetched some stranger's media instead of nothing.
-var reXHandle = regexp.MustCompile(`(?i)(?:^|[./])(?:twitter|x)\.com/([A-Za-z0-9_]{1,15})(?:[/?#]|$)`)
+// Matched against the parsed HOST, never against the whole string.
+//
+// "x.com" is a suffix of plenty of unrelated hosts: indexxx.com/m/<name>
+// became @m and pornbox.com/application/model/<id> became @application,
+// 119 of 1087 performers in one real library, most of which then fetched
+// some stranger's media instead of nothing.
+//
+// The old pattern anchored with (?:^|[./]) and accepted a path
+// separator, so it still lifted a handle out of any URL that merely
+// CONTAINED x.com/<name>: https://evil.example/x.com/victim yielded
+// "victim", as did a redirect query carrying twitter.com/victim. The
+// daemon would then drive the user's real X session against a
+// stranger's media tab and serve the result under the performer's name.
+// The poller and stash.PerformerHandle were both fixed to parse the
+// host; this was the last copy that was not.
+var reXPath = regexp.MustCompile(`(?i)^/([A-Za-z0-9_]{1,15})(?:[/?#]|$)`)
+
+func isXHost(h string) bool {
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	return h == "x.com" || h == "twitter.com" ||
+		strings.HasSuffix(h, ".x.com") || strings.HasSuffix(h, ".twitter.com")
+}
 
 var xReserved = map[string]bool{
 	"home": true, "search": true, "explore": true, "notifications": true,
@@ -62,8 +79,24 @@ var xReserved = map[string]bool{
 // HandleFromURLs returns the first valid X handle found in a performer's
 // urls[] (twitter.com or x.com), or "" if none.
 func HandleFromURLs(urls []string) string {
-	for _, u := range urls {
-		m := reXHandle.FindStringSubmatch(u)
+	for _, raw := range urls {
+		raw = strings.TrimSpace(raw)
+		u, err := url.Parse(raw)
+		if err != nil || u == nil {
+			continue
+		}
+		// A performer's urls[] is typed by hand, so a bare "x.com/name"
+		// with no scheme is ordinary; url.Parse reads that as a path
+		// with no host. Same handling as stash.PerformerHandle.
+		if u.Host == "" && !strings.HasPrefix(raw, "/") {
+			if u2, err2 := url.Parse("https://" + raw); err2 == nil {
+				u = u2
+			}
+		}
+		if !isXHost(u.Hostname()) {
+			continue
+		}
+		m := reXPath.FindStringSubmatch(u.EscapedPath())
 		if len(m) == 2 {
 			h := m[1]
 			if !xReserved[strings.ToLower(h)] {
