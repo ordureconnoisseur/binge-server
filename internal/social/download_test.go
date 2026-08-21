@@ -2,6 +2,7 @@ package social
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,7 +71,11 @@ func TestAnExistingFileIsNeverReplaced(t *testing.T) {
 		Kind:     "video",
 		MediaURL: "https://i.redd.it/abc.mp4",
 	}, dir, dest)
-	if err != nil {
+	// errAlreadyHave, not nil: the file is accepted, and the caller is
+	// told nothing was fetched so it can skip the tag pass. Reporting
+	// plain success made Save go on to rewrite performers, tags, urls,
+	// date and details on an item the user may have curated by hand.
+	if !errors.Is(err, errAlreadyHave) {
 		t.Fatalf("expected the existing file to be accepted: %v", err)
 	}
 	got, _ := os.ReadFile(dest)

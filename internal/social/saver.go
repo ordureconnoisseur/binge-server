@@ -193,16 +193,31 @@ func (s *Saver) Save(ctx context.Context, req SaveRequest) (*SaveResult, error) 
 	// gets an immediate "queued" result — the file is on disk + scanning,
 	// and the metadata lands when the scan completes.
 	if err := s.download(ctx, req, writeDir, writePath); err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+		if !errors.Is(err, errAlreadyHave) {
+			return nil, fmt.Errorf("download: %w", err)
+		}
+		// The file was already there, so this save has nothing to add
+		// and must not touch what is already in Stash.
+		//
+		// It used to fall through to the scan and the tag pass, and that
+		// pass writes performer_ids, tag_ids, urls, date and details -
+		// all list-replacing in Stash. So saving the same post twice,
+		// which nothing prevents because no post is ever marked saved,
+		// discarded whatever the user had curated on that item: extra
+		// performers gone, hand-added tags reduced to the source tag.
+		// The file was untouched and the response was 200.
+		return &SaveResult{
+			StashType: stashTypeFor(req.Kind),
+			Path:      stashPath,
+			Handle:    handle,
+			Pending:   false,
+		}, nil
 	}
 	if err := s.stash.MetadataScan(ctx, []string{stashDir}); err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
 
-	stashType := "image"
-	if req.Kind == "video" {
-		stashType = "scene"
-	}
+	stashType := stashTypeFor(req.Kind)
 	// One tagger at a time per save, and never more than a handful at
 	// once. Each polls Stash every few seconds for up to five minutes,
 	// so a burst of saves used to put an unbounded number of pollers on
@@ -315,6 +330,11 @@ func (s *Saver) lockDest(dest string) func() {
 	return m.Unlock
 }
 
+// errAlreadyHave means the file was there before this request and
+// nothing was fetched. Not a failure: the caller reports success, but it
+// must not go on to rewrite the item's metadata. See Save.
+var errAlreadyHave = errors.New("already downloaded")
+
 func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string) error {
 	// req.MediaURL is caller-supplied and flows into a yt-dlp argv
 	// (pornhub) or an http GET (everything else). Both are dangerous with
@@ -341,7 +361,7 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	// too.
 	defer s.lockDest(dest)()
 	if fi, err := os.Stat(dest); err == nil && fi.Mode().IsRegular() {
-		return nil // already downloaded
+		return errAlreadyHave
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -537,6 +557,13 @@ func dateFromUnix(ts int64) string {
 }
 
 // underRoot reports whether path is inside root after both are cleaned and
+func stashTypeFor(kind string) string {
+	if kind == "video" {
+		return "scene"
+	}
+	return "image"
+}
+
 // stashLibraryPath builds the path Stash will know the file by.
 //
 // It cannot use filepath: the daemon and Stash need not run on the same
