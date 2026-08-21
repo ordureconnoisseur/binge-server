@@ -182,14 +182,10 @@ func (s *Saver) Save(ctx context.Context, req SaveRequest) (*SaveResult, error) 
 			"refusing to write outside the library root: %s", writePath)
 	}
 
-	// Build the Stash-side path with the separator implied by stashRoot
-	// (Windows Stash = backslash, Linux = forward slash).
-	sep := "/"
-	if strings.Contains(stashRoot, `\`) {
-		sep = `\`
+	stashDir, stashPath, err := stashLibraryPath(stashRoot, src, handle, filename)
+	if err != nil {
+		return nil, err
 	}
-	stashDir := strings.Join([]string{stashRoot, src, handle}, sep)
-	stashPath := stashDir + sep + filename
 
 	// Download + scan happen up front (so failures surface to the caller),
 	// but the file may not register in Stash for a while when the scan
@@ -541,6 +537,35 @@ func dateFromUnix(ts int64) string {
 }
 
 // underRoot reports whether path is inside root after both are cleaned and
+// stashLibraryPath builds the path Stash will know the file by.
+//
+// It cannot use filepath: the daemon and Stash need not run on the same
+// OS, and the separator that matters is the one Stash stores, inferred
+// from the library root the user configured.
+//
+// Trailing separators come off before joining. A root entered with one
+// - `Z:\Media\social\`, which is what the Windows address bar gives you,
+// or a bare drive root - produced a doubled separator in the middle of
+// the path. Stash records the file under its own cleaned path, so the
+// doubled one never matched on the way back and the save stayed
+// untagged while retrying for five minutes. A root of just `\` was
+// worse: joining turned it into `\\reddit\alice`, a UNC path, aiming the
+// scan at a network host named after the source.
+func stashLibraryPath(stashRoot, src, handle, filename string) (dir, full string, err error) {
+	sep := "/"
+	if strings.Contains(stashRoot, `\`) {
+		sep = `\`
+	}
+	cleanRoot := strings.TrimRight(stashRoot, `/\`)
+	if cleanRoot == "" {
+		return "", "", fmt.Errorf(
+			"the stash library path %q is a bare root with no folder in it",
+			stashRoot)
+	}
+	dir = strings.Join([]string{cleanRoot, src, handle}, sep)
+	return dir, dir + sep + filename, nil
+}
+
 // made absolute. Uses filepath.Rel rather than a string prefix so that
 // "/libraryX" is not treated as inside "/library".
 func underRoot(root, path string) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // Methods backing the binge-server "save a social post into Stash"
@@ -367,10 +368,48 @@ func PornhubViewkey(raw string) string {
 
 // SanitizeSegment makes a string safe to use as a single path segment
 // (folder/file name) — strips path separators and trims.
+// Longest segment we will write. Both limits are real and neither
+// implies the other: ext4 measures a name in bytes and stops at 255,
+// NTFS measures it in UTF-16 units and stops at 255, and a character
+// can be four bytes in one and two units in the other. Eighty
+// characters keeps names readable; 200 bytes keeps the widest of them
+// inside the byte limit with room for the extension.
+const (
+	maxSegmentRunes = 80
+	maxSegmentBytes = 200
+)
+
+// truncateSegment cuts to the first limit reached, always on a character
+// boundary.
+func truncateSegment(s string) string {
+	if len(s) <= maxSegmentBytes && utf8.RuneCountInString(s) <= maxSegmentRunes {
+		return s
+	}
+	runes := 0
+	for i := range s {
+		// range over a string yields byte offsets at character starts,
+		// so i is always a safe place to cut.
+		if runes >= maxSegmentRunes || i > maxSegmentBytes {
+			return s[:i]
+		}
+		runes++
+	}
+	return s
+}
+
 func SanitizeSegment(s string) string {
 	s = strings.Map(func(r rune) rune {
 		switch r {
 		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+			return '_'
+		}
+		// Control characters are not legal in a Windows filename and
+		// stop the write dead with "invalid argument", which surfaces
+		// to the user as a failed save with nothing explaining why.
+		// They arrive here from performer names and from a
+		// caller-supplied handle, so they are worth cleaning rather
+		// than refusing.
+		if r < 0x20 || r == 0x7f {
 			return '_'
 		}
 		return r
@@ -379,8 +418,29 @@ func SanitizeSegment(s string) string {
 	if s == "" {
 		return "unknown"
 	}
-	if len(s) > 80 {
-		s = s[:80]
+	// Truncate on a character boundary.
+	//
+	// This used to slice bytes, which cuts a multi-byte character in
+	// half: a CJK handle came back as invalid UTF-8, and the two sides
+	// then disagreed about the name. Go re-encodes the broken tail as
+	// U+FFFD on the way to the Windows syscall, so the file landed under
+	// a name that was NOT the string we were holding - and since that
+	// string is also what we hand Stash as the scan path and later look
+	// the scene up by, the tag pass could never match it. The media
+	// saved and stayed untagged forever, retrying for five minutes each
+	// time.
+	//
+	// Slicing runes also stops two different handles that share a long
+	// prefix from truncating onto each other and pooling two performers'
+	// media into one folder.
+	if cut := truncateSegment(s); cut != s {
+		// The cut can expose a dot or space that Windows silently
+		// strips from the stored name, which would desync the two
+		// sides again.
+		s = strings.TrimSpace(strings.Trim(cut, "._"))
+		if s == "" {
+			return "unknown"
+		}
 	}
 	return s
 }
