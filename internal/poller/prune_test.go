@@ -35,7 +35,14 @@ func TestSafeToPrune(t *testing.T) {
 		{"an ordinary edit removing two of fifty", 48, 50, 2, false, true},
 		{"removing half waits to be asked again", 25, 50, 25, false, false},
 		{"removing half, asked the same twice", 25, 50, 25, true, true},
-		{"removing just under half is allowed at once", 26, 50, 24, false, true},
+		// This case used to expect true, which is the shape of the
+		// hole an audit walked through: a Stash reporting a low count
+		// and serving exactly that many rows is internally consistent,
+		// so nothing upstream objects, and a reindex hiding 170 of 350
+		// deleted them at once because 170 is just under half. A ratio
+		// always has a cliff to walk under.
+		{"removing just under half now waits too", 26, 50, 24, false, false},
+		{"removing just under half, confirmed", 26, 50, 24, true, true},
 		{"removing nearly everything waits", 1, 50, 49, false, false},
 		{"removing nearly everything, confirmed", 1, 50, 49, true, true},
 		// The trap the ratio alone used to set: every kept performer is

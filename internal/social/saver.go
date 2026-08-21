@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ordureconnoisseur/binge-server/internal/pornhub"
@@ -55,6 +56,10 @@ type Saver struct {
 
 	// Bounds the background taggers. Buffered, so a send is the permit.
 	taggers chan struct{}
+
+	// Guards destLocks, which serialises saves per destination.
+	destMu    sync.Mutex
+	destLocks map[string]*sync.Mutex
 
 	mu        sync.RWMutex
 	writeRoot string // path THIS daemon writes to (e.g. /library/social)
@@ -280,6 +285,40 @@ func (s *Saver) tagWhenScanned(req SaveRequest, label, token, stashType, stashPa
 	}
 }
 
+// incomingPath names the temporary file a download writes to.
+//
+// Unique per attempt, because a fixed name is shared by every save of
+// the same item and nothing serialises them: two concurrent saves wrote
+// to one temp, and a leftover from a killed download was resumed into
+// by the next attempt. Deliberately not ".part", which yt-dlp treats as
+// its own and strips from -o.
+func incomingPath(dest string) string {
+	return fmt.Sprintf("%s.%d-%d.incoming", dest, os.Getpid(), atomic.AddUint64(&incomingSeq, 1))
+}
+
+var incomingSeq uint64
+
+// One save at a time per destination.
+//
+// Nothing serialised these, so two saves of the same item ran together:
+// they raced the final rename, and the loser's file replaced the
+// winner's. Keyed on the destination rather than globally, so unrelated
+// saves still run in parallel.
+func (s *Saver) lockDest(dest string) func() {
+	s.destMu.Lock()
+	if s.destLocks == nil {
+		s.destLocks = map[string]*sync.Mutex{}
+	}
+	m, ok := s.destLocks[dest]
+	if !ok {
+		m = &sync.Mutex{}
+		s.destLocks[dest] = m
+	}
+	s.destMu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
 func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string) error {
 	// req.MediaURL is caller-supplied and flows into a yt-dlp argv
 	// (pornhub) or an http GET (everything else). Both are dangerous with
@@ -304,6 +343,7 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	// small legitimate media, and deleted it before the request had even
 	// been validated. IsRegular because os.Stat succeeds on a directory
 	// too.
+	defer s.lockDest(dest)()
 	if fi, err := os.Stat(dest); err == nil && fi.Mode().IsRegular() {
 		return nil // already downloaded
 	}
@@ -329,7 +369,7 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 		// anyway, the second attempt short-circuited and skipped the
 		// tagging. Measured against yt-dlp 2026.03.17: ".part" is
 		// stripped, ".incoming" is honoured verbatim.
-		tmp := dest + ".incoming"
+		tmp := incomingPath(dest)
 		defer func() { _ = os.Remove(tmp) }()
 		if err := s.pornhub.Download(ctx, req.MediaURL, tmp); err != nil {
 			return err
@@ -361,7 +401,7 @@ func (s *Saver) download(ctx context.Context, req SaveRequest, dir, dest string)
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("upstream %d", resp.StatusCode)
 	}
-	tmp := dest + ".part"
+	tmp := incomingPath(dest)
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err

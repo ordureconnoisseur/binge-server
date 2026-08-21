@@ -278,6 +278,28 @@ func (p *Poller) SyncPerformers(ctx context.Context) error {
 			"stash reported %d performers but only %d arrived; not reconciling against a partial list",
 			reported, total)
 	}
+	// Compared with the last sync that worked, not just with what this
+	// one claimed.
+	//
+	// The check above only catches a page falling short of a high count.
+	// A Stash that reports a low count and serves exactly that many rows
+	// is internally consistent, so it sails through - and a reindex or a
+	// mid-migration snapshot produces precisely that shape. Measuring
+	// against the last good sync is what notices the library appearing
+	// to shrink for reasons Stash is not telling us about.
+	var lastTotal int
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT CAST(value AS INTEGER) FROM sync_state WHERE key='last_sync_total'`,
+	).Scan(&lastTotal)
+	if lastTotal > 0 && total*4 < lastTotal*3 {
+		return fmt.Errorf(
+			"stash returned %d performers where the last good sync saw %d; not reconciling against a shrunken list",
+			total, lastTotal)
+	}
+	_, _ = p.db.ExecContext(ctx,
+		`INSERT INTO sync_state(key,value) VALUES('last_sync_total', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		strconv.Itoa(total))
 
 	// Delete performers no longer present in Stash OR no longer linked
 	// to a reddit handle. Cascade removes their posts.
@@ -372,6 +394,19 @@ func (p *Poller) upsertPerformersBatch(ctx context.Context, performers []stash.P
 // stops the poll that follows it, saving config quietly stopped working
 // too. It is now asked for once and confirmed by repetition: the same
 // removal offered twice in a row is what the user meant.
+// Removals up to this many go through on the first sync. Anything more
+// waits to be asked twice.
+//
+// There used to be a ratio here instead, and a ratio has a cliff to walk
+// under: a Stash reporting a transiently low count AND serving that many
+// rows is internally consistent, so nothing upstream notices, and a
+// reindex that hid 170 of 350 performers deleted them and their posts
+// immediately because 170 is just under half. A small edit is someone
+// removing a Reddit URL or two; anything bigger is worth ten minutes,
+// since the daemon is a background job and nothing user-facing waits on
+// it, while the posts it cascades away cannot be re-fetched.
+const pruneWithoutAskingUpTo = 2
+
 func safeToPrune(keep, existing, removing int, sameAsLastTime bool) (bool, string) {
 	if existing == 0 {
 		return true, ""
@@ -379,8 +414,8 @@ func safeToPrune(keep, existing, removing int, sameAsLastTime bool) (bool, strin
 	if keep == 0 {
 		return false, "stash returned no linked performers at all"
 	}
-	if removing*2 >= existing && !sameAsLastTime {
-		return false, "half or more of the library would go; waiting for the next sync to say the same"
+	if removing > pruneWithoutAskingUpTo && !sameAsLastTime {
+		return false, "more than a couple of performers would go; waiting for the next sync to say the same"
 	}
 	return true, ""
 }
@@ -853,15 +888,26 @@ func (p *Poller) sweepOldPosts(ctx context.Context) error {
 		p.log.Warn("retention cutoff is not sane, skipping sweep", "cutoff", cutoff)
 		return nil
 	}
-	var lastPoll string
+	// Bounded by how much it would remove, not by the clock.
+	//
+	// Comparing the cutoff with the last poll looked like a clock check
+	// and was not one: both come from the same clock, so a daemon that
+	// is steadily fast stamps a fast last_poll too and the comparison
+	// stays satisfied while the sweep deletes posts whose timestamps are
+	// real and recent. Proportion cannot be fooled that way. A nightly
+	// sweep of a ninety-day window removes about a day's worth; being
+	// asked to remove most of the archive at once means something is
+	// wrong with the clock or the data, and the archive is not
+	// re-fetchable.
+	var total, doomed int
+	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM posts`).Scan(&total)
 	_ = p.db.QueryRowContext(ctx,
-		`SELECT value FROM sync_state WHERE key='last_poll'`).Scan(&lastPoll)
-	if lastPoll != "" {
-		if t, err := time.Parse(time.RFC3339, lastPoll); err == nil && cutoff > t.Unix() {
-			p.log.Warn("retention cutoff is later than the last poll, skipping sweep",
-				"cutoff", cutoff, "last_poll", lastPoll)
-			return nil
-		}
+		`SELECT COUNT(*) FROM posts WHERE created_utc > 0 AND created_utc < ?`,
+		cutoff).Scan(&doomed)
+	if total > 20 && doomed*2 > total {
+		p.log.Error("retention sweep would remove most of the archive, skipping it",
+			"would_remove", doomed, "total", total, "cutoff", cutoff)
+		return nil
 	}
 	// created_utc > 0 because a post whose timestamp Reddit omitted
 	// stores zero, and zero is older than every cutoff. Those were

@@ -164,8 +164,7 @@ func (c *Client) ExtractStreamURL(ctx context.Context, videoURL string) (string,
 	defer cancel()
 	out, err := c.run(ctx,
 		"--impersonate", impersonate,
-		"-f", progressiveFormat,
-		"-g", "--", videoURL,
+		"-f", progressiveFormat, "-g", "--", videoURL,
 	)
 	if err != nil {
 		return "", err
@@ -189,6 +188,16 @@ func (c *Client) Download(ctx context.Context, videoURL, destPath string) error 
 		"-f", progressiveFormat,
 		"-o", destPath,
 		"--no-part",
+		// Never resume. yt-dlp defaults to --continue, so a file
+		// already at the target is APPENDED to from its current size.
+		// A leftover from a download that was killed, or from a second
+		// save of the same item running at the same time, was then
+		// completed by the next attempt into a full-size file whose
+		// opening bytes belong to the abandoned one. That renamed into
+		// the library, was marked saved, and the existing-file
+		// short-circuit meant it was never fetched again: permanent,
+		// silent corruption of a file the user believes is fine.
+		"--no-continue",
 		"--", videoURL,
 	)
 	return err
