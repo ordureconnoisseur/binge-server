@@ -402,6 +402,16 @@ func SanitizeSegment(s string) string {
 		switch r {
 		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
 			return '_'
+		case '%':
+			// yt-dlp reads its -o argument as an output TEMPLATE, so a
+			// %(title)s in a caller-supplied id made it write to a name
+			// derived from the video rather than the one we asked for -
+			// the rename then failed, the request 502'd, and the
+			// cleanup removed the name we asked for rather than the one
+			// it used, leaving an unreferenced file in the library. A
+			// bare % is worse: it fails the template outright, so every
+			// save for a performer named "100% ..." errored.
+			return '_'
 		}
 		// Control characters are not legal in a Windows filename and
 		// stop the write dead with "invalid argument", which surfaces

@@ -604,7 +604,11 @@ func (p *Poller) PollAll(ctx context.Context) error {
 			if st := statusFor(err); st != "" {
 				pending = append(pending, statusMark{stashID: t.StashID, status: st})
 			}
-			if errors.Is(err, reddit.ErrForbidden) {
+			if errors.Is(err, reddit.ErrForbidden) ||
+				errors.Is(err, reddit.ErrRedirected) {
+				// A redirect counts toward the blanket check for the
+				// same reason a 403 does: on its own it says nothing,
+				// and every handle doing it says the cookie is dead.
 				forbidden++
 			}
 			p.log.Warn("poll performer failed", "stash_id", t.StashID, "handle", t.Handle, "err", err)
@@ -680,7 +684,14 @@ func (p *Poller) PollAll(ctx context.Context) error {
 // in sync_state. Stored as the RFC3339 time it was first noticed, so the
 // UI can say when stories stopped rather than just that they have.
 func (p *Poller) setCookieExpired(ctx context.Context, expired, sawSuccess bool) {
-	if expired {
+	// A cycle that fetched anything at all proves the cookie works, so
+	// nothing it also saw can mean the cookie is dead.
+	//
+	// This used to return here without consulting sawSuccess, so a
+	// single handle's verdict wrote the marker over the top of hundreds
+	// of successful fetches and the UI reported the cookie as expired
+	// while the pillar was working.
+	if expired && !sawSuccess {
 		// First sighting wins: keep the original timestamp across ticks
 		// so "since" does not reset to now on every failed cycle.
 		_, _ = p.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_state(key,value)
@@ -770,6 +781,12 @@ func statusFor(err error) string {
 		return "suspended"
 	case errors.Is(err, reddit.ErrForbidden):
 		return "unavailable"
+	case errors.Is(err, reddit.ErrRedirected):
+		// Recorded, so last_polled_at advances and a handle that always
+		// redirects cannot camp at the head of the queue - the targets
+		// are ordered by that column, so a performer whose error left
+		// it untouched was re-polled first on every cycle forever.
+		return "unavailable"
 	}
 	return ""
 }
@@ -799,20 +816,52 @@ func (p *Poller) pollOne(ctx context.Context, t pollTarget) (int, error) {
 		mediaURL := c.MediaURL
 		if c.NeedsRedgifs && c.RedgifsSlug != "" {
 			r, rerr := p.redgifs.Resolve(ctx, c.RedgifsSlug)
-			if rerr != nil {
+			switch {
+			case errors.Is(rerr, redgifs.ErrTemporary):
+				// Skipped entirely, so the next cycle tries again.
+				//
+				// This used to fall through to the link fallback below
+				// and insert the row, and the insert is
+				// ON CONFLICT DO NOTHING with no UPDATE anywhere in the
+				// codebase - media_url is written by that one statement
+				// and never again. So a single 429, which is easy to
+				// provoke because a performer's redgifs posts are
+				// resolved back-to-back with no pacing between them,
+				// turned every post from that point into a permanently
+				// dead link card. The error text said "will retry next
+				// poll" and nothing could.
+				p.log.Warn("redgifs unavailable, leaving the post for the next poll",
+					"stash_id", t.StashID, "reddit_id", post.ID,
+					"slug", c.RedgifsSlug, "err", rerr)
+				continue
+			case rerr != nil:
 				p.log.Warn("redgifs resolve failed",
 					"stash_id", t.StashID, "reddit_id", post.ID, "slug", c.RedgifsSlug, "err", rerr)
-				// Fall back to the original reddit url as link — still
-				// shows up in the feed, opens in a new tab to redgifs.
+				// The gif is genuinely gone. Fall back to the original
+				// reddit url as a link — still shows up in the feed,
+				// opens in a new tab to redgifs.
 				c.Kind = "link"
 				c.LinkURL = post.URL
-			} else if r.HD != "" {
+			case r.HD != "":
 				mediaURL = r.HD
-			} else if r.SD != "" {
+			case r.SD != "":
 				mediaURL = r.SD
-			} else if r.GIF != "" {
+			case r.GIF != "":
 				mediaURL = r.GIF
+			default:
+				// 200 with nothing playable in it. A video card with no
+				// media is a permanently dead tile, so this becomes a
+				// link like any other unresolvable post.
+				c.Kind = "link"
+				c.LinkURL = post.URL
 			}
+		} else if c.NeedsRedgifs {
+			// Marked as a redgifs video but no slug came out of the
+			// URL - a bare https://redgifs.com link does this. Nothing
+			// resolves it, so without this it was stored as a video
+			// with media_url NULL: a tile that can never play.
+			c.Kind = "link"
+			c.LinkURL = post.URL
 		}
 
 		nsfw := 0

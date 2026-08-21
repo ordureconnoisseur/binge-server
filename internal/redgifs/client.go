@@ -56,6 +56,14 @@ func New(userAgent string) *Client {
 
 var ErrNotFound = errors.New("redgifs gif not found")
 
+// ErrTemporary wraps a failure that says nothing about the gif: a rate
+// limit, an invalidated token, a 5xx, a dropped connection.
+//
+// The distinction is load-bearing because the caller writes its verdict
+// into a row it will never revisit. Treating "redgifs was busy" the same
+// as "this gif is gone" turned one 429 into a permanently dead card.
+var ErrTemporary = errors.New("redgifs temporarily unavailable")
+
 type Resolved struct {
 	HD  string
 	SD  string
@@ -124,7 +132,7 @@ func (c *Client) Resolve(ctx context.Context, slug string) (Resolved, error) {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Resolved{}, fmt.Errorf("redgifs gif request: %w", err)
+		return Resolved{}, fmt.Errorf("%w: gif request: %v", ErrTemporary, err)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -133,12 +141,16 @@ func (c *Client) Resolve(ctx context.Context, slug string) (Resolved, error) {
 		c.mu.Lock()
 		c.token = ""
 		c.mu.Unlock()
-		return Resolved{}, fmt.Errorf("redgifs 401 — token invalidated, will retry next poll")
+		return Resolved{}, fmt.Errorf(
+			"%w: 401, token invalidated", ErrTemporary)
 	case 404, 410:
 		return Resolved{}, ErrNotFound
 	default:
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBody)) // 16 MB cap
-		return Resolved{}, fmt.Errorf("redgifs %d: %s", resp.StatusCode, raw)
+		// A short prefix, not the whole body. The caller logs this and
+		// stores it, and 16 MB of upstream HTML is not a log line.
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return Resolved{}, fmt.Errorf(
+			"%w: %d: %s", ErrTemporary, resp.StatusCode, raw)
 	}
 
 	var body struct {

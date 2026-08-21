@@ -142,6 +142,10 @@ var (
 	ErrForbidden     = errors.New("reddit handle forbidden")
 	ErrRateLimit     = errors.New("reddit rate-limited")
 	ErrCookieExpired = errors.New("reddit session cookie invalid or expired")
+	// ErrRedirected is one handle being bounced, usually to the over18
+	// interstitial. It is NOT a verdict on the cookie: see the switch
+	// below and the blanket-refusal reasoning in the poller.
+	ErrRedirected = errors.New("reddit redirected the listing")
 )
 
 // Post mirrors the slice of Reddit's listing JSON we use.
@@ -240,10 +244,24 @@ func (c *Client) fetchListing(ctx context.Context, endpoint string) ([]Post, err
 		// fall through
 	case 301, 302, 303, 307, 308:
 		// Reddit redirects unauthenticated NSFW requests to an
-		// over18 interstitial. With our CheckRedirect we see the
-		// redirect status directly — treat as cookie-expired so the
-		// user sees a clear error in logs.
-		return nil, ErrCookieExpired
+		// over18 interstitial, and it also redirects a renamed or
+		// merged community. With our CheckRedirect we see the redirect
+		// status directly.
+		//
+		// This used to return ErrCookieExpired, which is a verdict on
+		// the whole account rather than on one handle. The poller acts
+		// on that by abandoning every performer after it and writing
+		// the cookie-expired marker, so ONE renamed subreddit told the
+		// user their Reddit cookie had died and stopped the pillar -
+		// and because that error records no handle status, the
+		// offender's last_polled_at never advanced, so it sorted first
+		// on the next cycle and the pillar never recovered.
+		//
+		// A per-handle error instead. If the cookie really has expired
+		// then every handle redirects, and the poller's blanket check
+		// reaches the same conclusion from the pattern rather than from
+		// a single case.
+		return nil, ErrRedirected
 	case 401:
 		return nil, ErrCookieExpired
 	case 403:

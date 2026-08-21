@@ -153,7 +153,21 @@ func (c *Client) SetCookies(authToken, ct0 string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if authToken == "" || ct0 == "" {
+		// Forgetting them means removing them from disk.
+		//
+		// This used to flip the flag and return, leaving the live
+		// auth_token and ct0 in gdl-x.json on a mounted volume
+		// indefinitely - so "forget my X credentials" removed the rows
+		// from the config store and left the actual cookies where they
+		// were, across restarts, since startup re-applies the empty
+		// values and again only flips the flag.
 		c.hasCookies = false
+		c.curAuth = ""
+		c.curCT0 = ""
+		if err := os.Remove(c.configPath); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove gallery-dl config: %w", err)
+		}
 		return nil
 	}
 	// Unchanged since last apply — config file already on disk.
@@ -169,7 +183,18 @@ func (c *Client) SetCookies(authToken, ct0 string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(c.configPath, buf, 0o600); err != nil {
+	// Temp file then rename, so a failure part-way cannot leave a
+	// half-written config behind. os.WriteFile truncates first, and the
+	// caller discards this error, so a failed write used to leave the
+	// file corrupt while hasCookies still said true - gallery-dl then
+	// ran against a broken config, which means anonymously, with
+	// nothing reported.
+	tmp := c.configPath + ".incoming"
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		return fmt.Errorf("write gallery-dl config: %w", err)
+	}
+	if err := os.Rename(tmp, c.configPath); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write gallery-dl config: %w", err)
 	}
 	c.hasCookies = true

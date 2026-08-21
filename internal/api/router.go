@@ -62,6 +62,9 @@ type Server struct {
 
 	refreshMu     sync.Mutex
 	lastRefreshAt time.Time
+	// Whether a manual refresh cycle is still running. The cooldown
+	// above bounds how often one may start; this bounds how many run.
+	refreshRunning bool
 
 	xCache     *xFeedCache
 	phStreams  *phStreamCache
@@ -406,8 +409,15 @@ func (s *Server) proxyRedgifs(w http.ResponseWriter, r *http.Request) {
 // Allowlist: any host ending in `.redd.it` or `.redditmedia.com`. Same
 // "no open-relay" guarantee as the redgifs proxy.
 var redditProxyHTTP = &http.Client{
-	Timeout:       30 * time.Second,
-	CheckRedirect: allowedHostSuffixes("redd.it", "redditmedia.com", "reddit.com"),
+	Timeout: 30 * time.Second,
+	// Deliberately NOT reddit.com. The first-hop check on this route
+	// excludes it, so allowing a hop TO it made the redirect set wider
+	// than the entry set: https://v.redd.it/<anything> 302s to
+	// https://www.reddit.com/video/<anything> for any id, which turned
+	// the route into a relay for reddit.com HTML served from this
+	// origin - and this origin is one the plugin hands the Stash API
+	// key to in a query string.
+	CheckRedirect: allowedHostSuffixes("redd.it", "redditmedia.com"),
 }
 
 func (s *Server) proxyReddit(w http.ResponseWriter, r *http.Request) {
@@ -644,7 +654,18 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	// probed against a private Stash below. Without this a caller could
 	// use the exemption to store a Reddit cookie and nothing else, and
 	// so occupy a daemon it never proved it owns.
-	firstRunPublicClaim := s.store.Get(configstore.KeyStashAPIKey) == "" && !requestFromPrivateIP(r)
+	// Every first-run claim, not only the ones that look remote.
+	//
+	// This used to require !requestFromPrivateIP, but RemoteAddr is the
+	// address of whatever last spoke to us, so any reverse proxy or
+	// container network in front of the daemon makes every caller on
+	// the internet look private and switches the check off. The
+	// exemption it was protecting - an owner on their own LAN running
+	// an authless Stash - is still served, because the negative control
+	// only refuses a Stash that accepts ANY key, and a claim against
+	// such a Stash cannot prove anything wherever it comes from.
+	firstRunClaim := s.store.Get(configstore.KeyStashAPIKey) == ""
+	firstRunPublicClaim := firstRunClaim && !requestFromPrivateIP(r)
 	if firstRunPublicClaim && (req.StashAPIKey == nil || *req.StashAPIKey == "") {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "the first request to an unconfigured binge-server reached from a public address must set the Stash API key",
@@ -680,10 +701,12 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		// also passes, the target is not checking, and the claim is
 		// refused rather than handing the daemon to whoever asked.
 		//
-		// Scoped to the public first-run claim on purpose. An owner on
-		// their own LAN running an authless Stash is doing something
-		// normal and must still be able to configure the daemon.
-		if firstRunPublicClaim {
+		// An owner on their own LAN running an authless Stash is doing
+		// something normal - and is still served, because this only
+		// refuses a Stash that accepts the bogus key too. What it
+		// stops is a claim being proved against a server the claimant
+		// controls, which no peer address can tell us anything about.
+		if firstRunClaim {
 			if err := probeStashAPIKey(r.Context(), stashURL, bogusProbeKey); err == nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{
 					"error": "that Stash accepts any API key, so it cannot prove who you are. Configure this daemon from its own network, or seed STASH_API_KEY.",
@@ -950,7 +973,14 @@ func probeStashAPIKey(ctx context.Context, baseURL, apiKey string) error {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
+	// 64 KB, not 8 MB. The request body is capped at 256 KB because an
+	// uncapped decode turned one POST into an OOM kill from an
+	// unauthenticated caller - but the handler then reads a response
+	// from a caller-supplied URL, with nothing limiting how many run at
+	// once, so an 8 MB allowance handed that same caller the
+	// amplification back. The answer being parsed here is
+	// {version{version}}.
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	_ = json.Unmarshal(raw, &wrap)
 	if len(wrap.Errors) > 0 {
 		return fmt.Errorf("%w: %s", errStashRejectedKey, wrap.Errors[0].Message)
@@ -1001,7 +1031,7 @@ func probeRedditCookie(ctx context.Context, cookie, userAgent string) error {
 			return 0, nil, err
 		}
 		defer resp.Body.Close()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MB cap
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // 64 KB is plenty
 		return resp.StatusCode, raw, nil
 	}
 
@@ -1204,10 +1234,35 @@ func (s *Server) redditRefresh(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// One cycle at a time, not one start every thirty seconds.
+	//
+	// The cooldown throttled how often a poll could BEGIN, and a cycle
+	// over a real library takes minutes: a hundred-millisecond pace per
+	// performer plus a listing fetch each. PollAll has no re-entrancy
+	// guard, so pressing refresh on the cooldown stacked cycles and
+	// multiplied the request rate at Reddit by however many were in
+	// flight. When Reddit then refused the burst, the poller read that
+	// as a blanket refusal and told the user their cookie had expired -
+	// so hammering refresh produced the one symptom most likely to send
+	// them looking for a new cookie.
+	if s.refreshRunning {
+		s.refreshMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"queued":  false,
+			"running": true,
+		})
+		return
+	}
 	s.lastRefreshAt = time.Now()
+	s.refreshRunning = true
 	s.refreshMu.Unlock()
 
 	go func() {
+		defer func() {
+			s.refreshMu.Lock()
+			s.refreshRunning = false
+			s.refreshMu.Unlock()
+		}()
 		bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		if err := s.poller.PollAll(bg); err != nil {
